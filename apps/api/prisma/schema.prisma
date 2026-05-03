@@ -1,0 +1,351 @@
+// Pipelineflow Engagement — Phase 1 schema.
+// Single-tenant. AuthUser = operator. Subscriber = end-user being messaged.
+// Strict separation; never conflate the two.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  // Declared so `prisma migrate` knows the extension is required. The
+  // 0001 migration enables it as part of the bootstrap.
+  extensions = [timescaledb]
+}
+
+// ─── Operators / auth ──────────────────────────────────────────────────────
+model AuthUser {
+  id           Int        @id @default(autoincrement())
+  email        String     @unique
+  name         String
+  passwordHash String
+  role         String     @default("admin") // 'admin' | 'editor' | 'viewer'
+  theme        String     @default("system") // 'system' | 'light' | 'dark'
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  sessions     Session[]
+  apiTokens    ApiToken[]
+  audits       OperatorAuditEvent[]
+}
+
+model Session {
+  id         String   @id // base64url 32-byte token
+  userId     Int
+  user       AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  lastSeenAt DateTime @default(now()) @updatedAt
+  userAgent  String?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model ApiToken {
+  id          String    @id // tok_<base64url>; public side, indexed
+  userId      Int
+  user        AuthUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  secretHash  String    // argon2id of the secret half
+  scopes      Json      @default("[]") // ApiTokenScope[] (validated in code)
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ─── Subscribers (end-users) ───────────────────────────────────────────────
+model Subscriber {
+  id            BigInt   @id @default(autoincrement())
+  // Stable id from the calling system (CRM contact id, app userId).
+  // Required so identify() upserts cleanly. Prefixed when sourced from CRM:
+  //   externalId='crm:contact:42'.
+  externalId    String   @unique
+  // Anonymous device/visitor ids observed before identify(). Append-only.
+  anonymousIds  String[]
+  email         String?
+  phone         String?
+  // Latest-write-wins merged trait bag. Hot path: segment compute.
+  traits        Json     @default("{}")
+  source        String   @default("api") // 'api' | 'crm' | 'import'
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  traitsLog        SubscriberTrait[]
+  audienceMembers  AudienceMember[]
+  deliveries       Delivery[]
+  subscriptions    SubscriptionState[]
+
+  @@index([email])
+  @@index([updatedAt])
+  @@index([source])
+}
+
+model SubscriberTrait {
+  id           BigInt     @id @default(autoincrement())
+  subscriberId BigInt
+  subscriber   Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  key          String
+  value        Json
+  source       String     // 'identify' | 'crm' | 'inferred' | 'admin'
+  observedAt   DateTime   @default(now())
+
+  @@index([subscriberId, key, observedAt])
+}
+
+// ─── Events ─────────────────────────────────────────────────────────────────
+// Converted to a Timescale hypertable on receivedAt by the
+// 0002_event_hypertable migration. Compression + retention policies are
+// configured there. Prisma sees this as a regular table.
+model Event {
+  id            BigInt   @default(autoincrement())
+  // Caller's idempotency key. Unique-on-non-null partial index added by
+  // the migration; can't express "unique partial" in Prisma directly.
+  messageId     String?
+  type          String   // 'track' | 'identify' | 'page' | 'screen' | 'group' | 'alias'
+  subscriberId  BigInt?
+  anonymousId   String?
+  externalId    String?  // wire externalId before resolution
+  name          String?  // event name for type='track'
+  properties    Json     @default("{}")
+  context       Json     @default("{}")
+  observedAt    DateTime
+  // Server receipt clock. Hypertable partition key.
+  receivedAt    DateTime @default(now())
+  source        String   @default("api")
+
+  // Composite PK includes the partition key — required for Timescale
+  // hypertables that have any unique constraint.
+  @@id([id, receivedAt])
+  @@index([subscriberId, observedAt])
+  @@index([name, observedAt])
+  @@index([receivedAt])
+}
+
+// ─── Audiences (segments) ──────────────────────────────────────────────────
+model Audience {
+  id                     Int       @id @default(autoincrement())
+  name                   String    @unique
+  description            String?
+  // JSON-tree definition. Validated by Zod (audienceDefinitionSchema) at
+  // the route layer; stored free-form so a node-type addition is a code
+  // change, not a migration.
+  definition             Json
+  status                 String    @default("active") // 'active' | 'paused' | 'archived'
+  computeIntervalSeconds Int       @default(300)
+  lastComputedAt         DateTime?
+  lastComputeMs          Int?
+  lastComputeError       String?
+  memberCount            Int       @default(0)
+  // Bumped on every successful compute pass — used to delete stale members.
+  computeVersion         Int       @default(0)
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  members    AudienceMember[]
+  broadcasts Broadcast[]
+
+  @@index([status])
+}
+
+model AudienceMember {
+  audienceId     Int
+  subscriberId   BigInt
+  enteredAt      DateTime   @default(now())
+  computeVersion Int        @default(1)
+  audience       Audience   @relation(fields: [audienceId], references: [id], onDelete: Cascade)
+  subscriber     Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+
+  @@id([audienceId, subscriberId])
+  @@index([subscriberId])
+  @@index([audienceId, computeVersion])
+}
+
+// ─── Templates ─────────────────────────────────────────────────────────────
+model Template {
+  id                  Int        @id @default(autoincrement())
+  name                String     @unique
+  channel             String     @default("email") // future: sms | push | webhook
+  // For email: { subject, fromName, fromEmail, replyTo, mjml, text? }.
+  // Validated by Zod templateCreateSchema at the route layer.
+  definition          Json
+  subscriptionGroupId Int?
+  subscriptionGroup   SubscriptionGroup? @relation(fields: [subscriptionGroupId], references: [id])
+  status              String     @default("draft") // 'draft' | 'published' | 'archived'
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  broadcasts Broadcast[]
+  deliveries Delivery[]
+
+  @@index([status])
+}
+
+// ─── Broadcasts ────────────────────────────────────────────────────────────
+model Broadcast {
+  id                Int       @id @default(autoincrement())
+  name              String
+  templateId        Int
+  template          Template  @relation(fields: [templateId], references: [id])
+  audienceId        Int
+  audience          Audience  @relation(fields: [audienceId], references: [id])
+  // 'draft' | 'scheduled' | 'snapshotting' | 'running' | 'paused'
+  // | 'completed' | 'cancelled' | 'failed'
+  status            String    @default("draft")
+  scheduledFor      DateTime?
+  snapshotTakenAt   DateTime?
+  totalRecipients   Int       @default(0)
+  sentCount         Int       @default(0)
+  failedCount       Int       @default(0)
+  skippedCount      Int       @default(0)
+  sendRatePerSecond Int       @default(10)
+  startedAt         DateTime?
+  completedAt       DateTime?
+  errorMessage      String?
+  runJobId          String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  deliveries BroadcastDelivery[]
+
+  @@index([status])
+  @@index([scheduledFor])
+}
+
+model BroadcastDelivery {
+  id           BigInt    @id @default(autoincrement())
+  broadcastId  Int
+  broadcast    Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+  subscriberId BigInt
+  // 'pending' | 'skipped' | 'sent' | 'failed'
+  status       String    @default("pending")
+  // Only present for skipped: 'unsubscribed' | 'suppressed' | 'no_email' | 'cancelled'
+  skipReason   String?
+  // Once a Delivery row exists, this points to it.
+  deliveryId   BigInt?
+  attemptCount Int       @default(0)
+  lastError    String?
+  createdAt    DateTime  @default(now())
+
+  @@unique([broadcastId, subscriberId])
+  @@index([broadcastId, status])
+}
+
+// ─── Deliveries (per-message outcomes; broadcasts and journeys both write here) ─
+model Delivery {
+  id                BigInt     @id @default(autoincrement())
+  subscriberId      BigInt
+  subscriber        Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  templateId        Int?
+  template          Template?  @relation(fields: [templateId], references: [id])
+  broadcastId       Int?
+  // Phase 2: journey runs land deliveries here too.
+  journeyRunId      BigInt?
+  channel           String     @default("email")
+  // 'queued' | 'sent' | 'delivered' | 'bounced' | 'complained'
+  // | 'opened' | 'clicked' | 'unsubscribed' | 'failed' | 'suppressed'
+  status            String     @default("queued")
+  // SES Message-Id; UNIQUE so duplicate SNS notifications are idempotent.
+  providerMessageId String?    @unique
+  toEmail           String
+  fromEmail         String
+  subject           String?
+  // Bounce/complaint reason text + diagnostic excerpt; rendered HTML/text
+  // is too large to stash here — keep it derivable from the template + traits.
+  meta              Json       @default("{}")
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  openedAt          DateTime?
+  clickedAt         DateTime?
+  bouncedAt         DateTime?
+  complainedAt      DateTime?
+  unsubscribedAt    DateTime?
+  failedAt          DateTime?
+  errorMessage      String?
+  createdAt         DateTime   @default(now())
+
+  @@index([subscriberId, createdAt])
+  @@index([broadcastId])
+  @@index([status, createdAt])
+}
+
+// ─── Subscriptions / suppression ───────────────────────────────────────────
+model SubscriptionGroup {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  channel     String   @default("email")
+  // 'opt_in' = must subscribe before send; 'opt_out' = subscribed by default.
+  type        String   @default("opt_out")
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  templates Template[]
+  states    SubscriptionState[]
+}
+
+model SubscriptionState {
+  subscriberId BigInt
+  groupId      Int
+  // 'subscribed' | 'unsubscribed'
+  status       String
+  // 'preference-center' | 'list-unsubscribe' | 'ses-bounce' | 'ses-complaint'
+  // | 'admin' | 'import' | 'crm'
+  source       String
+  changedAt    DateTime          @default(now())
+  subscriber   Subscriber        @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  group        SubscriptionGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@id([subscriberId, groupId])
+  @@index([groupId, status])
+}
+
+// Hard suppression. Checked before EVERY send irrespective of subscription
+// group state. Email is lowercased at write time.
+model Suppression {
+  email     String   @id
+  // 'hard_bounce' | 'complaint' | 'manual'
+  reason    String
+  details   String?
+  createdAt DateTime @default(now())
+}
+
+// ─── Provider creds ────────────────────────────────────────────────────────
+model Secret {
+  id        Int      @id @default(autoincrement())
+  // 'amazon-ses', 'crm-shared-key', 'preferences-jwt-key.previous', etc.
+  name      String   @unique
+  encrypted String   // AES-256-GCM envelope (see lib/crypto.ts)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Live SES quota / DKIM-status / etc. Worker writes; API reads.
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+// ─── Audit ─────────────────────────────────────────────────────────────────
+model OperatorAuditEvent {
+  id        BigInt   @id @default(autoincrement())
+  userId    Int?
+  user      AuthUser? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  // 'broadcast.launch' | 'broadcast.cancel' | 'audience.update'
+  // | 'template.publish' | 'secret.set' | 'subscriber.delete' | etc.
+  action    String
+  // Subject. Free-form ('audience:42', 'broadcast:7', 'subscriber:99').
+  target    String?
+  // Truncated to ~4KB — large diffs go into a sibling Delivery/Broadcast row.
+  meta      Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  @@index([action, createdAt])
+  @@index([userId, createdAt])
+}

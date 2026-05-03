@@ -1,0 +1,39 @@
+node_modules
+dist
+build
+.next
+.turbo
+.cache
+
+# env
+.env
+.env.*
+!.env.example
+!.env.docker.example
+
+# Local docker-compose overrides — operator-specific.
+docker-compose.override.yml
+docker-compose.override.*.yml
+docker-compose.staging.yml
+docker-compose.local.yml
+
+# Claude Code local settings
+.claude/
+**/.claude/
+
+# prisma
+apps/api/prisma/migrations/*-snapshot
+
+# editor / OS
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# logs
+npm-debug.log*
+pnpm-debug.log*
+*.log
+
+# typescript incremental build cache
+*.tsbuildinfo

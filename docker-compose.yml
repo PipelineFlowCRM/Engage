@@ -1,0 +1,151 @@
+# Pipelineflow Engagement — production home-lab stack.
+#
+# Quick start:
+#   1. cp .env.example .env  (then edit values)
+#      Generate the secrets:
+#        openssl rand -base64 32   → SECRET_ENCRYPTION_KEY
+#        openssl rand -base64 64   → PREFERENCES_JWT_KEY
+#        openssl rand -base64 64   → CRM_SHARED_SECRET (only if pairing with CRM)
+#   2. docker compose up -d --build
+#   3. docker compose exec api pnpm prisma:seed   (optional default subscription groups + seed admin)
+#   4. Visit http://localhost:5174
+#
+# Default ports are shifted off PipelineFlow CRM's defaults so both stacks can
+# co-exist on one host:
+#     CRM        Engagement
+#     postgres   5439         5440
+#     redis      6380         6381
+#     api        4000         4100
+#     web        5173         5174
+
+services:
+  postgres:
+    # TimescaleDB-HA bundles Postgres 16 + the timescaledb extension. On the
+    # first boot, postgres-init applies CREATE EXTENSION via our 0001
+    # migration and the 0002 migration converts Event into a hypertable.
+    image: timescale/timescaledb-ha:pg16
+    container_name: pfengagement-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pfengagement}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      POSTGRES_DB: ${POSTGRES_DB:-pfengagement}
+    volumes:
+      - pfengagement-pgdata:/home/postgres/pgdata/data
+    ports:
+      - '${BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5440}:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-pfengagement}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: pfengagement-redis
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - 'exec redis-server --maxmemory ${REDIS_MAXMEMORY:-256mb} --maxmemory-policy noeviction $${REDIS_PASSWORD:+--requirepass "$$REDIS_PASSWORD"}'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    volumes:
+      - pfengagement-redis:/data
+    ports:
+      - '${BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6381}:6379'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'redis-cli ${REDIS_PASSWORD:+-a "$$REDIS_PASSWORD"} ping | grep -q PONG'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: pfengagement-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4100
+      DATABASE_URL: postgresql://${POSTGRES_USER:-pfengagement}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-pfengagement}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379
+      BULL_BOARD_ENABLED: ${BULL_BOARD_ENABLED:-true}
+      JOBS_TEST_ENDPOINT_ENABLED: ${JOBS_TEST_ENDPOINT_ENABLED:-false}
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:5174}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY}
+      PREFERENCES_JWT_KEY: ${PREFERENCES_JWT_KEY}
+      PREFERENCES_JWT_KEY_PREVIOUS: ${PREFERENCES_JWT_KEY_PREVIOUS:-}
+      CRM_BASE_URL: ${CRM_BASE_URL:-}
+      CRM_SHARED_SECRET: ${CRM_SHARED_SECRET:-}
+      EVENT_RETENTION_DAYS: ${EVENT_RETENTION_DAYS:-365}
+      EVENT_COMPRESSION_AFTER_DAYS: ${EVENT_COMPRESSION_AFTER_DAYS:-7}
+      BACKUP_RETAIN_DAYS: ${BACKUP_RETAIN_DAYS:-30}
+      BACKUP_DEBOUNCE_SEC: ${BACKUP_DEBOUNCE_SEC:-300}
+    volumes:
+      - pfengagement-backups:/backups
+    ports:
+      - '${BIND_HOST:-127.0.0.1}:${API_PORT:-4100}:4100'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:4100/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    container_name: pfengagement-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-pfengagement}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-pfengagement}?connection_limit=10
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:5174}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY}
+      PREFERENCES_JWT_KEY: ${PREFERENCES_JWT_KEY}
+      CRM_BASE_URL: ${CRM_BASE_URL:-}
+      CRM_SHARED_SECRET: ${CRM_SHARED_SECRET:-}
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_API_URL: /api
+    container_name: pfengagement-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - '${BIND_HOST:-127.0.0.1}:${WEB_PORT:-5174}:80'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:80/']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  pfengagement-pgdata:
+  pfengagement-redis:
+  # Pre-migrate pg_dump files. To pull off-host:
+  #   docker compose cp api:/backups ./backups-copy
+  pfengagement-backups:
