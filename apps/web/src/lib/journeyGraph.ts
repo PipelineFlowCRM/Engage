@@ -198,10 +198,13 @@ export function applyLayout(
 
 let nextNodeIdCounter = 0;
 export function newNodeId(prefix: string): string {
-  // Stable across re-renders within a session — combines a monotonic local
-  // counter with a chunk of randomness.
+  // Combine a monotonic local counter, the current ms epoch, and 4 bytes
+  // of entropy. The randomness matters across hot-reload cycles (where
+  // the counter resets) and across cloned-journey saves where we don't
+  // want timestamp-prefix collisions.
   nextNodeIdCounter += 1;
-  return `${prefix}-${Date.now().toString(36)}-${nextNodeIdCounter}`;
+  const rand = Math.floor(Math.random() * 0xffffffff).toString(36);
+  return `${prefix}-${Date.now().toString(36)}-${nextNodeIdCounter}-${rand}`;
 }
 
 export function emptyJourneyGraph(): JourneyGraph {
@@ -209,6 +212,11 @@ export function emptyJourneyGraph(): JourneyGraph {
   const exitId = 'exit';
   const entry: JourneyNode = { type: 'EventEntry', event: 'signed_up', next: exitId };
   const exit: JourneyNode = { type: 'Exit' };
+  // Single edge instance — the previous version constructed two distinct
+  // Edge objects with the same id, one passed to applyLayout and one
+  // returned. xyflow's reconciliation tolerates that but it left the
+  // editor's `edges` state and the layout-input out of sync.
+  const edges = [makeEdge(entryId, exitId, HANDLES.next)];
   return {
     entry: entryId,
     nodes: applyLayout(
@@ -216,8 +224,8 @@ export function emptyJourneyGraph(): JourneyGraph {
         { id: entryId, type: 'EventEntry', position: { x: 0, y: 0 }, data: { node: entry } },
         { id: exitId, type: 'Exit', position: { x: 0, y: 200 }, data: { node: exit } },
       ],
-      [makeEdge(entryId, exitId, HANDLES.next)],
+      edges,
     ),
-    edges: [makeEdge(entryId, exitId, HANDLES.next)],
+    edges,
   };
 }

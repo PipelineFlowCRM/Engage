@@ -180,9 +180,20 @@ function renderFields(
                 const k = e.target.value as 'event' | 'audience-enter' | 'audience-exit';
                 if (k === 'event') {
                   onChange({ ...node, signal: { kind: 'event', event: 'completed_onboarding' } });
-                } else {
-                  onChange({ ...node, signal: { kind: k, audienceId: ctx.audiences[0]?.id ?? 0 } });
+                  return;
                 }
+                // Don't auto-fill a placeholder audienceId of 0 — it
+                // would silently submit an invalid id. Require the
+                // operator to pick a real one (the AudienceSelect below
+                // shows an obvious "— select —" prompt) and surface a
+                // validation error in the editor preview.
+                const firstAudienceId = ctx.audiences[0]?.id;
+                if (firstAudienceId == null) {
+                  // No audiences exist yet — the operator can't sensibly
+                  // pick this signal type. Bail back to event.
+                  return;
+                }
+                onChange({ ...node, signal: { kind: k, audienceId: firstAudienceId } });
               }}
             >
               <option value="event">Event</option>

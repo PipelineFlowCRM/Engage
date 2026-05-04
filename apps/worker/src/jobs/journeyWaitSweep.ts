@@ -1,27 +1,26 @@
 // Wait sweep. Runs every 30s. Finds JourneyWait rows whose expiresAt has
-// passed, fires the WaitFor node's timeoutNext branch (or exits the run if
-// no timeoutNext is set). Locks the wait rows via SKIP LOCKED so a second
-// worker doesn't double-fire.
+// passed and fires the WaitFor node's timeoutNext branch (or exits the
+// run if no timeoutNext is set). Each timeout is processed under the
+// per-run advisory lock so we serialise against any concurrent
+// journeyTick or journeyTrigger transition for the same run.
 
-import { Queue } from 'bullmq';
 import { QUEUE_JOURNEY_TICK } from '@pipelineflow-engagement/shared';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
-import { redisConnection } from '../lib/redis.js';
-import { lookupNode, parseDefinition, recordStep } from '../lib/journey.js';
-
-const tickQueue = new Queue(QUEUE_JOURNEY_TICK, { connection: redisConnection });
+import { LOCK_NS, withAdvisoryLock } from '../lib/locks.js';
+import { lookupNode, parseDefinition } from '../lib/journey.js';
+import { journeyTickQueue as tickQueue } from '../lib/queues.js';
 
 const SWEEP_LIMIT = 500;
 
 export async function processJourneyWaitSweep(): Promise<void> {
-  const expired = await prisma.$queryRaw<Array<{ id: bigint; runId: bigint }>>`
-    SELECT id, "runId" FROM "JourneyWait"
-    WHERE "expiresAt" < NOW()
-    ORDER BY "expiresAt" ASC
-    LIMIT ${SWEEP_LIMIT}
-    FOR UPDATE SKIP LOCKED
-  `;
+  // Initial scan unlocked — we re-validate under the per-run lock below.
+  const expired = await prisma.journeyWait.findMany({
+    where: { expiresAt: { lt: new Date() } },
+    orderBy: { expiresAt: 'asc' },
+    take: SWEEP_LIMIT,
+    select: { id: true, runId: true },
+  });
   if (expired.length === 0) return;
 
   for (const w of expired) {
@@ -37,32 +36,43 @@ export async function processJourneyWaitSweep(): Promise<void> {
 }
 
 async function fireTimeout(runId: bigint, waitId: bigint): Promise<void> {
-  const run = await prisma.journeyRun.findUnique({
-    where: { id: runId },
-    include: { version: true },
-  });
-  if (!run || run.status !== 'waiting') {
-    // Stale. Just clean up the wait.
-    await prisma.journeyWait.delete({ where: { id: waitId } }).catch(() => undefined);
-    return;
-  }
-  const def = parseDefinition(run.version.definition);
-  const node = lookupNode(def, run.currentNodeId);
-  if (node.type !== 'WaitFor') {
-    logger.warn(
-      { runId: runId.toString(), nodeId: run.currentNodeId },
-      'journey-wait-sweep: wait points at non-WaitFor node; cleaning up',
-    );
-    await prisma.journeyWait.delete({ where: { id: waitId } });
-    return;
-  }
+  await withAdvisoryLock(LOCK_NS.journeyRun, runId.toString(), async (tx) => {
+    const wait = await tx.journeyWait.findUnique({ where: { id: waitId } });
+    // Already resolved — nothing to do.
+    if (!wait) return;
+    if (wait.expiresAt > new Date()) {
+      // Race with a producer that extended expiresAt. Safe no-op.
+      return;
+    }
 
-  if (!node.timeoutNext) {
-    // No timeout branch — exit the run.
-    await prisma.$transaction(async (tx) => {
-      await recordStep(tx, runId, run.currentNodeId, 'WaitFor', 'timed_out', {
-        cause: 'timeout',
-        next: 'exit',
+    const run = await tx.journeyRun.findUnique({
+      where: { id: runId },
+      include: { version: true },
+    });
+    if (!run || run.status !== 'waiting') {
+      await tx.journeyWait.delete({ where: { id: waitId } });
+      return;
+    }
+    const def = parseDefinition(run.version.definition);
+    const node = lookupNode(def, run.currentNodeId);
+    if (node.type !== 'WaitFor') {
+      logger.warn(
+        { runId: runId.toString(), nodeId: run.currentNodeId },
+        'journey-wait-sweep: wait points at non-WaitFor node; cleaning up',
+      );
+      await tx.journeyWait.delete({ where: { id: waitId } });
+      return;
+    }
+
+    if (!node.timeoutNext) {
+      await tx.journeyRunStep.create({
+        data: {
+          runId,
+          nodeId: run.currentNodeId,
+          nodeType: 'WaitFor',
+          outcome: 'timed_out',
+          meta: { cause: 'timeout', next: 'exit' },
+        },
       });
       await tx.journeyWait.delete({ where: { id: waitId } });
       await tx.journeyRun.update({
@@ -73,32 +83,35 @@ async function fireTimeout(runId: bigint, waitId: bigint): Promise<void> {
           exitReason: 'wait-timeout',
         },
       });
-    });
-    return;
-  }
+      return;
+    }
 
-  await prisma.$transaction(async (tx) => {
-    await recordStep(tx, runId, run.currentNodeId, 'WaitFor', 'timed_out', {
-      cause: 'timeout',
-      next: node.timeoutNext!,
+    await tx.journeyRunStep.create({
+      data: {
+        runId,
+        nodeId: run.currentNodeId,
+        nodeType: 'WaitFor',
+        outcome: 'timed_out',
+        meta: { cause: 'timeout', next: node.timeoutNext },
+      },
     });
     await tx.journeyWait.delete({ where: { id: waitId } });
     await tx.journeyRun.update({
       where: { id: runId },
       data: {
         status: 'running',
-        currentNodeId: node.timeoutNext!,
+        currentNodeId: node.timeoutNext,
         scheduledFor: null,
       },
     });
+    await tickQueue.add(
+      QUEUE_JOURNEY_TICK,
+      {
+        runId: runId.toString(),
+        expectedNodeId: node.timeoutNext,
+        expectedVersionId: run.versionId,
+      },
+      { jobId: `tick:${runId.toString()}:${node.timeoutNext}:timeout` },
+    );
   });
-  await tickQueue.add(
-    QUEUE_JOURNEY_TICK,
-    {
-      runId: runId.toString(),
-      expectedNodeId: node.timeoutNext!,
-      expectedVersionId: run.versionId,
-    },
-    { jobId: `tick:${runId.toString()}:${node.timeoutNext!}:timeout` },
-  );
 }

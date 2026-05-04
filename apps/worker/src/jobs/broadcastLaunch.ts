@@ -4,13 +4,11 @@
 
 import type { Job } from 'bullmq';
 import type { BroadcastLaunchJobData } from '@pipelineflow-engagement/shared';
-import { Queue } from 'bullmq';
 import { QUEUE_BROADCAST_BATCH } from '@pipelineflow-engagement/shared';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
-import { redisConnection } from '../lib/redis.js';
+import { broadcastBatchQueue } from '../lib/queues.js';
 
-const broadcastBatchQueue = new Queue(QUEUE_BROADCAST_BATCH, { connection: redisConnection });
 const BATCH_SIZE = 100;
 
 export async function processBroadcastLaunch(job: Job<BroadcastLaunchJobData>) {

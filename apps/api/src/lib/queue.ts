@@ -9,6 +9,7 @@ import {
   QUEUE_DELIVERABILITY_ROLLUP,
   QUEUE_EVENT_INGEST,
   QUEUE_GENERATE,
+  QUEUE_JOURNEY_STUCK_RUN_SWEEP,
   QUEUE_JOURNEY_TICK,
   QUEUE_JOURNEY_TRIGGER,
   QUEUE_JOURNEY_WAIT_SWEEP,
@@ -157,6 +158,11 @@ export const journeyWaitSweepQueue = new Queue(QUEUE_JOURNEY_WAIT_SWEEP, {
   connection: redisConnection,
   defaultJobOptions: { attempts: 1, removeOnComplete: { age: 3_600, count: 60 } },
 });
+// Stuck-run sweep: hourly recovery for runs orphaned mid-trigger.
+export const journeyStuckRunSweepQueue = new Queue(QUEUE_JOURNEY_STUCK_RUN_SWEEP, {
+  connection: redisConnection,
+  defaultJobOptions: { attempts: 1, removeOnComplete: { age: 24 * 3_600, count: 24 } },
+});
 // Trigger: starts a new run (or no-ops if one already exists for the
 // (journey, subscriber, version) tuple). Producer is the audience compute
 // job (audience-enter) and the events ingest worker (event entry match).
@@ -190,6 +196,7 @@ export const allQueues = [
   journeyTickQueue,
   journeyTriggerQueue,
   journeyWaitSweepQueue,
+  journeyStuckRunSweepQueue,
   deliverabilityRollupQueue,
   generateQueue,
 ];

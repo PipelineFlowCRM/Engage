@@ -1,37 +1,24 @@
-// Per-send worker. Renders the template, sends via SES, writes the
-// Delivery row + flips BroadcastDelivery to 'sent'/'failed'.
-//
-// Defense-in-depth: re-checks Suppression and SubscriptionState even though
-// snapshotting filtered them — they may have flipped between snapshot and
-// send (an opener-time unsubscribe, an SES bounce that suppressed mid-batch).
+// Per-send worker. Delegates the render+SES+Delivery pipeline to the
+// shared sendTemplate helper so journeys and broadcasts go through the
+// same idempotent path. The job's responsibility is now just:
+//   1. Load BroadcastDelivery + verify it's still 'pending'.
+//   2. Load Subscriber.
+//   3. Call sendTemplate with idempotencyKey = "bd:<id>".
+//   4. Translate the outcome into BroadcastDelivery status updates +
+//      Broadcast counters.
 
 import type { Job } from 'bullmq';
 import type { BroadcastSendJobData } from '@pipelineflow-engagement/shared';
-import {
-  emailTemplateDefinitionSchema,
-  type EmailTemplateDefinition,
-} from '@pipelineflow-engagement/shared';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
-import { renderEmail } from '../lib/render.js';
-import { sendMail } from '../integrations/ses/sendMail.js';
-import { issuePreferencesToken } from '../lib/preferencesJwt.js';
-import { env } from '../env.js';
-
-const SUBJECT_MAX = 998;
+import { sendTemplate } from '../lib/messaging.js';
 
 export async function processBroadcastSend(job: Job<BroadcastSendJobData>) {
   const id = BigInt(job.data.broadcastDeliveryId);
 
   const bd = await prisma.broadcastDelivery.findUnique({
     where: { id },
-    include: {
-      broadcast: {
-        include: {
-          template: { include: { subscriptionGroup: true } },
-        },
-      },
-    },
+    include: { broadcast: { include: { template: true } } },
   });
   if (!bd) {
     logger.warn({ id: id.toString() }, 'broadcast send: row missing');
@@ -44,130 +31,66 @@ export async function processBroadcastSend(job: Job<BroadcastSendJobData>) {
   if (bd.broadcast.status === 'paused' || bd.broadcast.status === 'cancelled') {
     return;
   }
-  const tpl = bd.broadcast.template;
-  if (tpl.subscriptionGroupId == null) {
-    await markFailed(id, 'Template has no subscription group');
-    return;
-  }
 
   const subscriber = await prisma.subscriber.findUnique({ where: { id: bd.subscriberId } });
-  if (!subscriber || !subscriber.email) {
-    await markSkipped(id, 'no_email');
-    return;
-  }
-  // Re-check suppression
-  const supp = await prisma.suppression.findUnique({
-    where: { email: subscriber.email.toLowerCase() },
-  });
-  if (supp) {
-    await markSkipped(id, 'suppressed');
-    return;
-  }
-  // Re-check subscription state
-  const sub = await prisma.subscriptionState.findUnique({
-    where: {
-      subscriberId_groupId: { subscriberId: subscriber.id, groupId: tpl.subscriptionGroupId },
-    },
-  });
-  if (sub?.status === 'unsubscribed') {
-    await markSkipped(id, 'unsubscribed');
+  if (!subscriber) {
+    await markSkipped(bd.broadcastId, id, 'no_email');
     return;
   }
 
-  const definition = emailTemplateDefinitionSchema.parse(tpl.definition) as EmailTemplateDefinition;
-
-  // Mint a per-subscriber preferences token and inject the unsubscribe URL.
-  const token = await issuePreferencesToken(subscriber.id);
-  const preferencesUrl = `${env.APP_ORIGIN}/p/preferences/${token}`;
-  const unsubscribeUrl = `${preferencesUrl}/unsubscribe?groupId=${tpl.subscriptionGroupId}`;
-
-  const ctx = {
-    subscriber: {
-      externalId: subscriber.externalId,
-      email: subscriber.email,
-      ...((subscriber.traits as object) ?? {}),
-    },
-    unsubscribe_url: unsubscribeUrl,
-    preferences_url: preferencesUrl,
-  };
-  const rendered = await renderEmail({ ...definition, context: ctx });
-
-  // Truncate subject — SES rejects > 998 chars.
-  const subject = rendered.subject.slice(0, SUBJECT_MAX);
-
-  // Pre-write the Delivery row in 'queued' so the SES webhook can find it
-  // by providerMessageId once the send returns. We update with the
-  // providerMessageId post-send.
-  const delivery = await prisma.delivery.create({
-    data: {
-      subscriberId: subscriber.id,
-      templateId: tpl.id,
-      broadcastId: bd.broadcastId,
-      channel: 'email',
-      status: 'queued',
-      toEmail: subscriber.email,
-      fromEmail: rendered.fromEmail,
-      subject,
-      meta: { broadcastDeliveryId: id.toString() },
-    },
+  const outcome = await sendTemplate({
+    templateId: bd.broadcast.templateId,
+    subscriber,
+    broadcastId: bd.broadcastId,
+    idempotencyKey: `bd:${id.toString()}`,
   });
 
-  try {
-    const out = await sendMail({
-      toEmail: subscriber.email,
-      fromEmail: rendered.fromEmail,
-      fromName: rendered.fromName,
-      replyTo: rendered.replyTo,
-      subject,
-      html: rendered.html,
-      text: rendered.text,
-      headers: {
-        'List-Unsubscribe': `<${unsubscribeUrl}>, <mailto:unsubscribe@${rendered.fromEmail.split('@')[1]}>`,
-        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-      },
-      tags: {
-        delivery_id: delivery.id.toString(),
-        broadcast_id: String(bd.broadcastId),
-      },
-    });
+  if (outcome.status === 'sent') {
     await prisma.$transaction([
-      prisma.delivery.update({
-        where: { id: delivery.id },
-        data: {
-          status: 'sent',
-          sentAt: new Date(),
-          providerMessageId: out.providerMessageId,
-        },
-      }),
       prisma.broadcastDelivery.update({
         where: { id },
-        data: { status: 'sent', deliveryId: delivery.id },
+        data: { status: 'sent', deliveryId: outcome.deliveryId },
       }),
       prisma.broadcast.update({
         where: { id: bd.broadcastId },
         data: { sentCount: { increment: 1 } },
       }),
     ]);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+  } else if (outcome.status === 'skipped') {
+    await markSkipped(bd.broadcastId, id, outcome.reason);
+  } else if (outcome.status === 'failed') {
+    // Keep BroadcastDelivery as 'pending' so BullMQ can retry. Per-send
+    // BullMQ attempts budget is in queue config; once exhausted, the
+    // QueueEvents listener in worker/src/index.ts flips the row to
+    // 'failed'.
+    await prisma.broadcastDelivery.update({
+      where: { id },
+      data: {
+        attemptCount: { increment: 1 },
+        lastError: outcome.error.slice(0, 4000),
+        deliveryId: outcome.deliveryId,
+      },
+    });
+    throw new Error(outcome.error);
+  } else {
+    // 'inflight' — previous attempt's outcome is unknown. Don't double-send.
+    // Mark as failed so the operator can investigate manually; the
+    // 'inflight' Delivery row remains as evidence.
     await prisma.$transaction([
-      prisma.delivery.update({
-        where: { id: delivery.id },
-        data: { status: 'failed', failedAt: new Date(), errorMessage: message.slice(0, 4000) },
-      }),
       prisma.broadcastDelivery.update({
         where: { id },
         data: {
-          attemptCount: { increment: 1 },
-          lastError: message.slice(0, 4000),
-          // Leave status='pending' so BullMQ retry replays this job — it'll
-          // create a new Delivery row each time. Hard fail after the BullMQ
-          // attempt budget is exhausted; the Worker's `failed` listener
-          // marks BroadcastDelivery 'failed' there.
+          status: 'failed',
+          deliveryId: outcome.deliveryId,
+          lastError: 'Previous attempt outcome unreconciled — refusing to retry',
         },
       }),
+      prisma.broadcast.update({
+        where: { id: bd.broadcastId },
+        data: { failedCount: { increment: 1 } },
+      }),
     ]);
-    throw err;
+    return;
   }
 
   // Check if this was the last pending row for this broadcast — flip to completed.
@@ -182,23 +105,15 @@ export async function processBroadcastSend(job: Job<BroadcastSendJobData>) {
   }
 }
 
-async function markSkipped(id: bigint, reason: string) {
-  await prisma.broadcastDelivery.update({
-    where: { id },
-    data: { status: 'skipped', skipReason: reason },
-  });
-  await prisma.broadcast.update({
-    where: { id: (await prisma.broadcastDelivery.findUnique({ where: { id } }))!.broadcastId },
-    data: { skippedCount: { increment: 1 } },
-  });
-}
-async function markFailed(id: bigint, error: string) {
-  const bd = await prisma.broadcastDelivery.update({
-    where: { id },
-    data: { status: 'failed', lastError: error.slice(0, 4000) },
-  });
-  await prisma.broadcast.update({
-    where: { id: bd.broadcastId },
-    data: { failedCount: { increment: 1 } },
-  });
+async function markSkipped(broadcastId: number, id: bigint, reason: string) {
+  await prisma.$transaction([
+    prisma.broadcastDelivery.update({
+      where: { id },
+      data: { status: 'skipped', skipReason: reason },
+    }),
+    prisma.broadcast.update({
+      where: { id: broadcastId },
+      data: { skippedCount: { increment: 1 } },
+    }),
+  ]);
 }

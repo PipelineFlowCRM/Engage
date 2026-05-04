@@ -50,6 +50,7 @@ export function TemplateEditor() {
   const [groupId, setGroupId] = useState<number | null>(null);
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
   const [previewWarnings, setPreviewWarnings] = useState<string[]>([]);
+  const [hydrated, setHydrated] = useState(false);
 
   const existing = useQuery({
     queryKey: ['template', id],
@@ -57,6 +58,7 @@ export function TemplateEditor() {
     enabled: Boolean(id),
   });
   useEffect(() => {
+    if (hydrated) return;
     if (existing.data?.template) {
       const t = existing.data.template;
       setName(t.name);
@@ -67,8 +69,9 @@ export function TemplateEditor() {
       setReplyTo(t.definition.replyTo ?? '');
       setMjml(t.definition.mjml);
       setText(t.definition.text ?? '');
+      setHydrated(true);
     }
-  }, [existing.data]);
+  }, [existing.data, hydrated]);
 
   const definition = useMemo(() => ({
     subject, fromName, fromEmail,
@@ -90,7 +93,12 @@ export function TemplateEditor() {
         ? api.post('/templates', body)
         : api.patch(`/templates/${id}`, body);
     },
-    onSuccess: () => { toast.success('Saved'); qc.invalidateQueries({ queryKey: ['templates'] }); navigate('/templates'); },
+    onSuccess: () => {
+      toast.success('Saved');
+      qc.invalidateQueries({ queryKey: ['templates'] });
+      if (!isNew) qc.invalidateQueries({ queryKey: ['template', id] });
+      navigate('/templates');
+    },
     onError: (err: Error) => toast.error(err.message),
   });
 

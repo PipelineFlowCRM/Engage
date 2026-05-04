@@ -122,15 +122,22 @@ function JourneyEditorInner() {
     [],
   );
   const onConnect = useCallback((connection: Connection) => {
-    setEdges((es) =>
-      addEdge(
+    // Each source handle can only have ONE outgoing edge — `next` /
+    // `trueNext` / `falseNext` / `timeoutNext` are scalars in the
+    // JourneyDefinition. Drop any pre-existing edge from the same source
+    // handle so a new connection replaces (not duplicates) the old one.
+    setEdges((es) => {
+      const filtered = es.filter(
+        (e) => !(e.source === connection.source && e.sourceHandle === connection.sourceHandle),
+      );
+      return addEdge(
         {
           ...connection,
           targetHandle: connection.targetHandle ?? HANDLES.target,
         },
-        es,
-      ),
-    );
+        filtered,
+      );
+    });
   }, []);
 
   const updateNodeData = useCallback((nodeId: string, next: JourneyNode) => {
@@ -179,6 +186,9 @@ function JourneyEditorInner() {
 
   const save = useMutation({
     mutationFn: () => {
+      // Guard: never save before hydration completes — would clobber the
+      // existing journey's name/description with the empty-string state.
+      if (!isNew && !hydrated) throw new Error('Still loading; please wait');
       const body: { name: string; description: string | null; definition?: JourneyDefinition } = {
         name,
         description: description || null,
@@ -186,12 +196,18 @@ function JourneyEditorInner() {
       if (saveDef.definition) body.definition = saveDef.definition;
       return isNew ? api.post('/journeys', body) : api.patch(`/journeys/${id}`, body);
     },
-    onSuccess: () => { toast.success('Saved'); qc.invalidateQueries({ queryKey: ['journeys'] }); navigate('/journeys'); },
+    onSuccess: () => {
+      toast.success('Saved');
+      qc.invalidateQueries({ queryKey: ['journeys'] });
+      if (!isNew) qc.invalidateQueries({ queryKey: ['journey', id] });
+      navigate('/journeys');
+    },
     onError: (err: Error) => toast.error(err.message),
   });
 
   const publish = useMutation({
     mutationFn: () => {
+      if (!hydrated) throw new Error('Still loading; please wait');
       if (!saveDef.definition) throw new Error('Definition has errors');
       const v = journeyDefinitionSchema.safeParse(saveDef.definition);
       if (!v.success) {
@@ -200,7 +216,12 @@ function JourneyEditorInner() {
       }
       return api.post(`/journeys/${id}/publish`, { definition: v.data });
     },
-    onSuccess: () => { toast.success('Published'); qc.invalidateQueries({ queryKey: ['journeys'] }); navigate('/journeys'); },
+    onSuccess: () => {
+      toast.success('Published');
+      qc.invalidateQueries({ queryKey: ['journeys'] });
+      if (!isNew) qc.invalidateQueries({ queryKey: ['journey', id] });
+      navigate('/journeys');
+    },
     onError: (err: Error) => toast.error(err.message),
   });
 
@@ -213,13 +234,13 @@ function JourneyEditorInner() {
         description="Drag handles to connect nodes. The right panel edits the selected node."
         actions={
           <>
-            <Button variant="outline" disabled={save.isPending} onClick={() => save.mutate()}>
-              {save.isPending ? 'Saving…' : 'Save draft'}
+            <Button variant="outline" disabled={save.isPending || !hydrated} onClick={() => save.mutate()}>
+              {save.isPending ? 'Saving…' : !hydrated ? 'Loading…' : 'Save draft'}
             </Button>
             {!isNew ? (
               <Button
                 variant="brand"
-                disabled={publish.isPending || saveDef.errors.length > 0}
+                disabled={publish.isPending || !hydrated || saveDef.errors.length > 0}
                 onClick={() => publish.mutate()}
                 title={saveDef.errors[0] ?? 'Publish current graph as a new version'}
               >

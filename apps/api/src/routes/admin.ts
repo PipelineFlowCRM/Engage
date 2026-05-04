@@ -39,12 +39,16 @@ adminRouter.delete(
 
     const email = sub.email?.toLowerCase() ?? null;
     await prisma.$transaction(async (tx) => {
-      // Anonymise deliveries — keep aggregate stats.
+      // Anonymise deliveries — keep aggregate stats but strip PII. SES
+      // diagnostic codes embed the recipient address, so errorMessage and
+      // providerMessageId need to go too.
       await tx.delivery.updateMany({
         where: { subscriberId: sub.id },
         data: {
           toEmail: 'redacted@example.invalid',
           subject: null,
+          errorMessage: null,
+          providerMessageId: null,
           meta: { redactedAt: new Date().toISOString() },
         },
       });

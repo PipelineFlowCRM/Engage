@@ -26,12 +26,20 @@ interface SnsBase {
 
 const certCache = new Map<string, Buffer>();
 
+// Strict region pattern. Matches sns.<region>.amazonaws.com exactly,
+// covering us-east-1 / eu-west-2 / cn-north-1 / etc. Rejects subdomains
+// like sns.attacker.foo.amazonaws.com that the previous endsWith/startsWith
+// pair would have accepted.
+const SNS_HOST_RE = /^sns\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?$/;
+
+// Reject SNS messages whose Timestamp is older than this. Replay protection.
+const SNS_MAX_AGE_MS = 15 * 60 * 1000;
+
 async function fetchCert(url: string): Promise<Buffer> {
   const cached = certCache.get(url);
   if (cached) return cached;
-  // Strict allow-list: AWS SNS certs are served from sns.<region>.amazonaws.com.
   const u = new URL(url);
-  if (!u.hostname.endsWith('.amazonaws.com') || !u.hostname.startsWith('sns.')) {
+  if (u.protocol !== 'https:' || !SNS_HOST_RE.test(u.hostname)) {
     throw new Error(`SNS cert URL host not allowed: ${u.hostname}`);
   }
   const buf = await new Promise<Buffer>((resolve, reject) => {
@@ -77,7 +85,15 @@ export async function validSnsSignature(message: unknown): Promise<boolean> {
   if (!m.SignatureVersion || (m.SignatureVersion !== '1' && m.SignatureVersion !== '2')) {
     return false;
   }
-  if (!m.Signature || !m.SigningCertURL) return false;
+  if (!m.Signature || !m.SigningCertURL || !m.Timestamp) return false;
+  // Replay protection: reject if the message's own Timestamp is too old.
+  // The Timestamp is part of the canonical signed string, so an attacker
+  // can't mutate it without breaking the signature.
+  const ts = Date.parse(m.Timestamp);
+  if (Number.isNaN(ts) || Math.abs(Date.now() - ts) > SNS_MAX_AGE_MS) {
+    logger.warn({ timestamp: m.Timestamp }, 'sns: rejecting replayed/stale message');
+    return false;
+  }
   const cert = await fetchCert(m.SigningCertURL);
   const verifier = createVerify(m.SignatureVersion === '2' ? 'RSA-SHA256' : 'RSA-SHA1');
   verifier.update(canonicalString(m), 'utf8');
@@ -128,6 +144,12 @@ export async function handleSesNotification(
   prisma: PrismaClient,
 ): Promise<void> {
   const msg = outer as SnsBase;
+  // SNS Message field has a 256KB ceiling at AWS; we cap a little higher.
+  // The signature has already been verified so this is belt-and-braces.
+  if (typeof msg.Message !== 'string' || msg.Message.length > 512 * 1024) {
+    logger.warn({ msgId: msg.MessageId }, 'ses notification body too large or missing');
+    return;
+  }
   let inner: SesNotificationBody;
   try {
     inner = JSON.parse(msg.Message);

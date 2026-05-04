@@ -1,67 +1,89 @@
 // Journey tick. Advances one JourneyRun by one node — or hot-loops a few
 // non-delayed nodes within TICK_NODE_BUDGET.
 //
-// At-least-once protection. BullMQ may deliver a tick more than once
-// (worker restart mid-process; manual retry from Bull Board). Two guards:
-//   1. Job-data carries (expectedNodeId, expectedVersionId). The runner
-//      bails at the top if the run row's currentNodeId / versionId don't
-//      match — a duplicate tick for a node we've already advanced past
-//      becomes a no-op.
-//   2. Send-side: Delivery.providerMessageId is UNIQUE, so even if the
-//      runner did somehow duplicate a Message step, SES wouldn't double-send
-//      (the second insert would fail and the runner would mark failed).
-//      Plus the broader sendTemplate path is wrapped in delivery-row
-//      transactions.
+// Concurrency model — three layers, each catches a different failure mode:
 //
-// Row-level locking via SELECT … FOR UPDATE SKIP LOCKED. Two workers
-// can't both process the same run; the loser exits cleanly.
+//   1. **Per-run advisory lock** (this file, withAdvisoryLock). Held for
+//      the duration of the tick. Two concurrent ticks targeting the same
+//      run serialize: the loser blocks until the winner commits, then
+//      reads the post-state and (almost always) bails on the
+//      expectedNodeId guard.
+//
+//   2. **Stable BullMQ jobIds** (caller-side). Tickers use deterministic
+//      ids like `tick:<runId>:<nodeId>:<fireTime>` so BullMQ can't run
+//      two simultaneous instances of the same logical step.
+//
+//   3. **Idempotency keys on Delivery** (lib/messaging.ts). Even if a
+//      Message-node tick is replayed past both guards above, the
+//      idempotency key on (runId, nodeId) blocks the second SES send.
+//
+// Together these prevent: duplicate sends, duplicate state advances,
+// duplicate JourneyRunStep audit rows, and the WaitFor signal-race
+// (since the resume worker also acquires the same lock).
 
 import type { Job } from 'bullmq';
-import type { JourneyTickJobData, JourneyNode } from '@pipelineflow-engagement/shared';
-import { Queue } from 'bullmq';
+import type { JourneyNode, JourneyTickJobData } from '@pipelineflow-engagement/shared';
 import { QUEUE_JOURNEY_TICK } from '@pipelineflow-engagement/shared';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
-import { redisConnection } from '../lib/redis.js';
 import {
   TICK_NODE_BUDGET,
   computeDelayMs,
-  isInAudience,
   lookupNode,
   parseDefinition,
-  recordStep,
 } from '../lib/journey.js';
+import { LOCK_NS, withAdvisoryLock } from '../lib/locks.js';
 import { sendTemplate } from '../lib/messaging.js';
+import { journeyTickQueue as tickQueue } from '../lib/queues.js';
 
-const tickQueue = new Queue<JourneyTickJobData>(QUEUE_JOURNEY_TICK, { connection: redisConnection });
+// Tick acquires the per-run lock + an open tx for the duration. Inside
+// that tx we read+validate state, run the step (including the SES call
+// for Message nodes — its idempotency key handles cross-tx atomicity),
+// and persist the next state. Nested tx within sendTemplate runs as a
+// savepoint inside the outer tx.
+const TICK_TIMEOUT_MS = 60_000;
 
 export async function processJourneyTick(job: Job<JourneyTickJobData>): Promise<void> {
   const { runId, expectedNodeId, expectedVersionId } = job.data;
   const id = BigInt(runId);
 
-  // Take row-level lock. If another worker has it, we exit; their tick is
-  // the authoritative one and BullMQ will retry only if they fail.
-  const locked = await prisma.$queryRaw<Array<{ id: bigint }>>`
-    SELECT id FROM "JourneyRun" WHERE id = ${id} FOR UPDATE SKIP LOCKED LIMIT 1
-  `;
-  if (locked.length === 0) {
-    logger.debug({ runId }, 'journey-tick: another worker holds the row, skipping');
-    return;
-  }
+  const result = await withAdvisoryLock(
+    LOCK_NS.journeyRun,
+    runId,
+    async (tx) => runTickInTx(tx, id, runId, expectedNodeId, expectedVersionId),
+    { timeoutMs: TICK_TIMEOUT_MS },
+  );
 
-  const run = await prisma.journeyRun.findUnique({
+  if (result === null) {
+    logger.debug({ runId }, 'journey-tick: another worker holds the lock, skipping');
+  }
+}
+
+interface TickContext {
+  tx: Prisma.TransactionClient;
+  runId: string;          // wire-format (BigInt as string) for queue payloads
+  runIdBigInt: bigint;
+  expectedVersionId: number;
+}
+
+async function runTickInTx(
+  tx: Prisma.TransactionClient,
+  id: bigint,
+  runId: string,
+  expectedNodeId: string,
+  expectedVersionId: number,
+): Promise<void> {
+  const run = await tx.journeyRun.findUnique({
     where: { id },
     include: { version: true, journey: true, subscriber: true },
   });
-  if (!run) return; // run was deleted; nothing to do
+  if (!run) return;
   if (run.status !== 'running' && run.status !== 'waiting') return;
   if (run.journey.status === 'archived') {
-    await terminateRun(id, 'failed', 'journey-archived');
+    await terminateRunInTx(tx, id, 'failed', 'journey-archived');
     return;
   }
-
-  // Idempotency guards
   if (run.currentNodeId !== expectedNodeId) {
     logger.debug(
       { runId, expectedNodeId, actualNodeId: run.currentNodeId },
@@ -80,46 +102,28 @@ export async function processJourneyTick(job: Job<JourneyTickJobData>): Promise<
   const definition = parseDefinition(run.version.definition);
   let currentNodeId = run.currentNodeId;
   let context = (run.context as Record<string, unknown>) ?? {};
+  const tickCtx: TickContext = { tx, runId, runIdBigInt: id, expectedVersionId };
 
   for (let i = 0; i < TICK_NODE_BUDGET; i += 1) {
     const node = lookupNode(definition, currentNodeId);
-    const result = await executeNode({
-      run: { id, subscriber: run.subscriber, journeyId: run.journeyId, versionId: run.versionId },
-      node,
-      currentNodeId,
-      context,
-    });
+    const result = await executeNode(tickCtx, run.subscriber, node, currentNodeId);
 
-    if (result.kind === 'wait') {
-      // executeNode already inserted JourneyWait + flipped state
-      return;
-    }
+    if (result.kind === 'wait') return;
     if (result.kind === 'exit') {
-      await terminateRun(id, 'completed', result.reason ?? null);
+      await terminateRunInTx(tx, id, 'completed', result.reason ?? null);
       return;
     }
-    // continue
-    if (result.contextPatch) {
-      context = { ...context, ...result.contextPatch };
-    }
+    if (result.contextPatch) context = { ...context, ...result.contextPatch };
+
     if (result.scheduledForMs && result.scheduledForMs > 0) {
-      // Delayed advance — persist new currentNodeId, schedule a future tick.
       const next = result.nextNodeId!;
       const fireAt = new Date(Date.now() + result.scheduledForMs);
       const newJob = await tickQueue.add(
         QUEUE_JOURNEY_TICK,
-        {
-          runId,
-          expectedNodeId: next,
-          expectedVersionId: run.versionId,
-        },
-        {
-          delay: result.scheduledForMs,
-          // Stable jobId so a duplicate enqueue (e.g. manual retry) collapses.
-          jobId: `tick:${runId}:${next}:${fireAt.getTime()}`,
-        },
+        { runId, expectedNodeId: next, expectedVersionId },
+        { delay: result.scheduledForMs, jobId: `tick:${runId}:${next}:${fireAt.getTime()}` },
       );
-      await prisma.journeyRun.update({
+      await tx.journeyRun.update({
         where: { id },
         data: {
           currentNodeId: next,
@@ -131,19 +135,17 @@ export async function processJourneyTick(job: Job<JourneyTickJobData>): Promise<
       });
       return;
     }
-    // No delay — loop within this same tick.
     currentNodeId = result.nextNodeId!;
   }
 
-  // We exhausted TICK_NODE_BUDGET. Persist where we are and re-enqueue
-  // immediately so another tick picks up. Better than blowing the budget.
+  // Budget hit. Persist state, re-enqueue.
   logger.warn({ runId, currentNodeId }, 'journey-tick: budget hit, re-enqueueing');
-  const newJob = await tickQueue.add(QUEUE_JOURNEY_TICK, {
-    runId,
-    expectedNodeId: currentNodeId,
-    expectedVersionId: run.versionId,
-  });
-  await prisma.journeyRun.update({
+  const newJob = await tickQueue.add(
+    QUEUE_JOURNEY_TICK,
+    { runId, expectedNodeId: currentNodeId, expectedVersionId },
+    { jobId: `tick:${runId}:${currentNodeId}:budget` },
+  );
+  await tx.journeyRun.update({
     where: { id },
     data: {
       currentNodeId,
@@ -153,155 +155,144 @@ export async function processJourneyTick(job: Job<JourneyTickJobData>): Promise<
   });
 }
 
-// Result of executing one node. The runner uses this to decide whether to
-// loop, schedule a delayed tick, or stop.
 type StepKind =
   | { kind: 'continue'; nextNodeId: string; scheduledForMs?: number; contextPatch?: Record<string, unknown> }
   | { kind: 'wait' }
   | { kind: 'exit'; reason?: string };
 
-interface ExecuteCtx {
-  run: { id: bigint; subscriber: import('@prisma/client').Subscriber; journeyId: number; versionId: number };
-  node: JourneyNode;
-  currentNodeId: string;
-  context: Record<string, unknown>;
-}
-
-async function executeNode(ctx: ExecuteCtx): Promise<StepKind> {
-  const { node, run, currentNodeId } = ctx;
-
+async function executeNode(
+  ctx: TickContext,
+  subscriber: import('@prisma/client').Subscriber,
+  node: JourneyNode,
+  currentNodeId: string,
+): Promise<StepKind> {
   switch (node.type) {
     case 'EventEntry':
     case 'SegmentEntry': {
-      // Entry nodes are inert when run by the tick — the trigger spawned
-      // the run, and run.currentNodeId is already set to entry.next when
-      // the run is created. If we ever arrive here, just advance.
-      await prisma.$transaction(async (tx) => {
-        await recordStep(tx, run.id, currentNodeId, node.type, 'exited');
-      });
+      // Entry nodes are inert when reached by the runner — the trigger
+      // already started the run pointing at entry.next. Just record + advance.
+      await recordStepInTx(ctx.tx, ctx.runIdBigInt, currentNodeId, node.type, 'exited');
       return { kind: 'continue', nextNodeId: node.next };
     }
 
     case 'Delay': {
-      // Delay is a virtual "advance, then wait until scheduledFor". The
-      // first time we hit the Delay node we record `entered` and schedule
-      // the next tick; the second time (after wakeup) we record `exited`
-      // and continue. Distinguish by checking if we're being entered fresh
-      // (run row's currentNodeId is this delay) or post-wakeup (we
-      // shouldn't be — runner should have already advanced past).
-      // Implementation: schedule the next tick and advance currentNodeId
-      // straight to next; when the next tick fires, currentNodeId will be
-      // the Delay's `next`, not this Delay. So the first time we touch
-      // Delay we just compute the wakeup and continue with scheduledForMs.
-      const ms = computeDelayMs(node, (run.subscriber.traits as Record<string, unknown>) ?? {});
-      await prisma.$transaction(async (tx) => {
-        await recordStep(tx, run.id, currentNodeId, 'Delay', 'entered', { ms });
-      });
+      const ms = computeDelayMs(node, (subscriber.traits as Record<string, unknown>) ?? {});
+      await recordStepInTx(ctx.tx, ctx.runIdBigInt, currentNodeId, 'Delay', 'entered', { ms });
       return { kind: 'continue', nextNodeId: node.next, scheduledForMs: ms };
     }
 
     case 'Message': {
+      // sendTemplate writes the Delivery row outside the run-tx (different
+      // connection). That's intentional: the SES call lives there, and the
+      // idempotency key on Delivery makes it safe across retries.
       const outcome = await sendTemplate({
         templateId: node.templateId,
-        subscriber: run.subscriber,
-        journeyRunId: run.id,
+        subscriber,
+        journeyRunId: ctx.runIdBigInt,
+        idempotencyKey: `jr:${ctx.runId}:${currentNodeId}`,
       });
-      await prisma.$transaction(async (tx) => {
-        await recordStep(
-          tx, run.id, currentNodeId, 'Message',
-          outcome.status === 'sent' ? 'exited'
-            : outcome.status === 'failed' ? 'errored'
-            : 'skipped',
-          {
-            outcome: outcome.status,
-            ...(outcome.status === 'sent' ? { deliveryId: outcome.deliveryId.toString() } : {}),
-            ...(outcome.status === 'skipped' ? { reason: outcome.reason } : {}),
-            ...(outcome.status === 'failed' ? { error: outcome.error.slice(0, 1000) } : {}),
-          },
-        );
-      });
-      // Always advance — a skipped/failed message shouldn't block the
-      // journey. Operators can spot failures via the deliveries inbox.
+      await recordStepInTx(
+        ctx.tx, ctx.runIdBigInt, currentNodeId, 'Message',
+        outcome.status === 'sent' ? 'exited'
+          : outcome.status === 'failed' || outcome.status === 'inflight' ? 'errored'
+          : 'skipped',
+        {
+          outcome: outcome.status,
+          ...(outcome.status === 'sent' ? { deliveryId: outcome.deliveryId.toString() } : {}),
+          ...(outcome.status === 'skipped' ? { reason: outcome.reason } : {}),
+          ...(outcome.status === 'failed' ? { error: outcome.error.slice(0, 1000) } : {}),
+          ...(outcome.status === 'inflight' ? { reason: 'inflight-orphan' } : {}),
+        },
+      );
       return { kind: 'continue', nextNodeId: node.next };
     }
 
     case 'WaitFor': {
-      // Insert JourneyWait, flip run to 'waiting'. Resume happens via the
-      // events ingest worker (signalType='event'), the audience compute
-      // worker (signalType='audience-enter|exit'), or the wait sweep
-      // (timeout). All three call resumeRun() (in journeyResume.ts) which
-      // re-enqueues a tick targeting node.next or node.timeoutNext.
       const expiresAt = new Date(Date.now() + node.timeoutSeconds * 1_000);
       const signalType = node.signal.kind;
       const signalKey =
-        node.signal.kind === 'event'
-          ? node.signal.event
-          : String(node.signal.audienceId);
+        node.signal.kind === 'event' ? node.signal.event : String(node.signal.audienceId);
       const predicate =
         node.signal.kind === 'event' && node.signal.properties
-          ? (node.signal.properties as unknown as import('@prisma/client').Prisma.InputJsonValue)
+          ? (node.signal.properties as unknown as Prisma.InputJsonValue)
           : undefined;
 
-      await prisma.$transaction(async (tx) => {
-        await recordStep(tx, run.id, currentNodeId, 'WaitFor', 'entered', {
+      await recordStepInTx(ctx.tx, ctx.runIdBigInt, currentNodeId, 'WaitFor', 'entered', {
+        signalType, signalKey, expiresAt: expiresAt.toISOString(),
+      });
+      await ctx.tx.journeyWait.upsert({
+        where: { runId: ctx.runIdBigInt },
+        create: {
+          runId: ctx.runIdBigInt,
           signalType,
           signalKey,
-          expiresAt: expiresAt.toISOString(),
-        });
-        // Replace any pre-existing wait for this run (rare — only if the
-        // run somehow re-entered the same WaitFor; the @unique on runId
-        // means we have to upsert).
-        await tx.journeyWait.upsert({
-          where: { runId: run.id },
-          create: {
-            runId: run.id,
-            signalType,
-            signalKey,
-            ...(predicate !== undefined ? { predicate } : {}),
-            expiresAt,
-          },
-          update: {
-            signalType,
-            signalKey,
-            // Prisma needs its JsonNull sentinel (not literal null) to clear
-            // a nullable Json column.
-            predicate: predicate !== undefined ? predicate : Prisma.JsonNull,
-            expiresAt,
-          },
-        });
-        await tx.journeyRun.update({
-          where: { id: run.id },
-          data: { status: 'waiting', scheduledFor: null, pendingJobId: null },
-        });
+          ...(predicate !== undefined ? { predicate } : {}),
+          expiresAt,
+        },
+        update: {
+          signalType,
+          signalKey,
+          predicate: predicate !== undefined ? predicate : Prisma.JsonNull,
+          expiresAt,
+        },
+      });
+      await ctx.tx.journeyRun.update({
+        where: { id: ctx.runIdBigInt },
+        data: { status: 'waiting', scheduledFor: null, pendingJobId: null },
       });
       return { kind: 'wait' };
     }
 
     case 'SegmentSplit': {
-      const member = await isInAudience(prisma, node.audienceId, run.subscriber.id);
+      const member = await ctx.tx.audienceMember.findUnique({
+        where: { audienceId_subscriberId: { audienceId: node.audienceId, subscriberId: subscriber.id } },
+      });
       const branch = member ? node.trueNext : node.falseNext;
-      await prisma.$transaction(async (tx) => {
-        await recordStep(tx, run.id, currentNodeId, 'SegmentSplit', 'exited', {
-          audienceId: node.audienceId,
-          branch: member ? 'true' : 'false',
-        });
+      await recordStepInTx(ctx.tx, ctx.runIdBigInt, currentNodeId, 'SegmentSplit', 'exited', {
+        audienceId: node.audienceId,
+        branch: member ? 'true' : 'false',
       });
       return { kind: 'continue', nextNodeId: branch };
     }
 
     case 'Exit': {
-      await prisma.$transaction(async (tx) => {
-        await recordStep(tx, run.id, currentNodeId, 'Exit', 'exited', {
-          ...(node.reason ? { reason: node.reason } : {}),
-        });
+      await recordStepInTx(ctx.tx, ctx.runIdBigInt, currentNodeId, 'Exit', 'exited', {
+        ...(node.reason ? { reason: node.reason } : {}),
       });
       return { kind: 'exit', reason: node.reason };
     }
   }
 }
 
-async function terminateRun(id: bigint, status: 'completed' | 'failed', exitReason: string | null) {
-  await prisma.journeyRun.update({
+// In-tx versions of the helpers, taking a TransactionClient instead of
+// the global prisma client. Pre-existing prisma-using helpers in
+// lib/journey.ts are kept for callers that don't have a tx.
+async function recordStepInTx(
+  tx: Prisma.TransactionClient,
+  runId: bigint,
+  nodeId: string,
+  nodeType: string,
+  outcome: 'entered' | 'exited' | 'skipped' | 'errored' | 'timed_out',
+  meta?: Record<string, unknown>,
+): Promise<void> {
+  await tx.journeyRunStep.create({
+    data: {
+      runId,
+      nodeId,
+      nodeType,
+      outcome,
+      meta: ((meta ?? {}) as Prisma.InputJsonValue),
+    },
+  });
+}
+
+async function terminateRunInTx(
+  tx: Prisma.TransactionClient,
+  id: bigint,
+  status: 'completed' | 'failed',
+  exitReason: string | null,
+): Promise<void> {
+  await tx.journeyRun.update({
     where: { id },
     data: {
       status,
@@ -311,4 +302,9 @@ async function terminateRun(id: bigint, status: 'completed' | 'failed', exitReas
       scheduledFor: null,
     },
   });
+  // Clean up any pending JourneyWait so a future signal doesn't try to
+  // resume a terminated run. (H3.) The cascade-delete on JourneyRun
+  // handles the eventual-row-delete case, but terminated runs stick
+  // around for audit; deleting the wait now keeps signal handling fast.
+  await tx.journeyWait.deleteMany({ where: { runId: id } });
 }

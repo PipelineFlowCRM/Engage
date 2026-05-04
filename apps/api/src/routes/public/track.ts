@@ -13,12 +13,15 @@ import {
 import { requireApiTokenScope } from '../../auth/middleware.js';
 import { asyncHandler, HttpError } from '../../lib/error.js';
 import { enqueueEventIngest } from '../../lib/queue.js';
+import { ingestLimiter } from '../../lib/rateLimit.js';
 
 import '../_sideEffects.js';
 
 export const trackRouter = Router();
 
 // All events ingest endpoints require a Bearer ApiToken with engagement:ingest.
+// Rate limit runs first so even authenticated bursts get throttled.
+trackRouter.use(ingestLimiter);
 trackRouter.use(requireApiTokenScope('engagement:ingest'));
 
 type AnyEvent = {
@@ -64,6 +67,14 @@ function toJobData(ev: AnyEvent, defaultReceivedAt: string): EventIngestJobData 
       ? { ...(ev.properties ?? {}), groupId: ev.groupId }
       : ev.properties;
 
+  // observedAt: client's clock (Segment.com convention). Clamped below to
+  // ±24h around now so a misbehaving client can't backdate events to
+  // arbitrary historical chunks.
+  // receivedAt: server clock — never trusted from the client. This is the
+  // hypertable partition key, so accepting a client value would let a
+  // malicious or buggy SDK drive inserts into compressed Timescale chunks
+  // and fail permanently.
+  const observedAt = clampObservedAt(ev.timestamp ?? defaultReceivedAt, defaultReceivedAt);
   return {
     type: ev.type,
     messageId: ev.messageId ?? randomUUID(),
@@ -74,10 +85,20 @@ function toJobData(ev: AnyEvent, defaultReceivedAt: string): EventIngestJobData 
     name: ev.event ?? ev.name ?? null,
     properties: properties ?? null,
     context: ev.context ?? null,
-    observedAt: ev.timestamp ?? defaultReceivedAt,
-    receivedAt: ev.receivedAt ?? defaultReceivedAt,
+    observedAt,
+    receivedAt: defaultReceivedAt,
     source: 'api',
   };
+}
+
+const OBSERVED_AT_SKEW_MS = 24 * 60 * 60 * 1000;
+
+function clampObservedAt(candidate: string, defaultIso: string): string {
+  const t = Date.parse(candidate);
+  if (Number.isNaN(t)) return defaultIso;
+  const now = Date.parse(defaultIso);
+  if (Math.abs(now - t) > OBSERVED_AT_SKEW_MS) return defaultIso;
+  return candidate;
 }
 
 trackRouter.post(

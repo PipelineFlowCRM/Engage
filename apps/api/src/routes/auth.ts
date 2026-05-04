@@ -13,6 +13,7 @@ import { asyncHandler, HttpError } from '../lib/error.js';
 import { verifySsoToken } from '../lib/crmAuth.js';
 import { env } from '../env.js';
 import { audit } from '../lib/audit.js';
+import { loginLimiter } from '../lib/rateLimit.js';
 
 import './_sideEffects.js';
 
@@ -22,6 +23,7 @@ export const authRouter = Router();
 // self-host this is the bootstrap flow only.
 authRouter.post(
   '/register',
+  loginLimiter,
   asyncHandler(async (req, res) => {
     const input = registerSchema.parse(req.body);
     const existing = await prisma.authUser.count();
@@ -39,6 +41,7 @@ authRouter.post(
 
 authRouter.post(
   '/login',
+  loginLimiter,
   asyncHandler(async (req, res) => {
     const input = loginSchema.parse(req.body);
     const user = await prisma.authUser.findUnique({ where: { email: input.email } });

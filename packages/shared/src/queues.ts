@@ -81,6 +81,9 @@ export type CrmActivityPushJobData = {
 export const QUEUE_JOURNEY_TICK = 'engagement-journey-tick' as const;
 export const QUEUE_JOURNEY_WAIT_SWEEP = 'engagement-journey-wait-sweep' as const;
 export const QUEUE_JOURNEY_TRIGGER = 'engagement-journey-trigger' as const;
+// Recovers runs stuck in 'running' without a scheduled tick — typically
+// from a worker crash mid-trigger before the initial tick was enqueued.
+export const QUEUE_JOURNEY_STUCK_RUN_SWEEP = 'engagement-journey-stuck-run-sweep' as const;
 
 // Tick: advance a single run by one node (or hot-loop a few non-delayed
 // nodes). Idempotent at the worker entry point via expectedNodeId +

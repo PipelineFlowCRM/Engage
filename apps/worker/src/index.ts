@@ -9,6 +9,7 @@ import {
   QUEUE_CRM_ACTIVITY_PUSH,
   QUEUE_DELIVERABILITY_ROLLUP,
   QUEUE_EVENT_INGEST,
+  QUEUE_JOURNEY_STUCK_RUN_SWEEP,
   QUEUE_JOURNEY_TICK,
   QUEUE_JOURNEY_TRIGGER,
   QUEUE_JOURNEY_WAIT_SWEEP,
@@ -28,7 +29,9 @@ import { processCrmActivityPush } from './jobs/crmActivityPush.js';
 import { processJourneyTick } from './jobs/journeyTick.js';
 import { processJourneyTrigger } from './jobs/journeyTrigger.js';
 import { processJourneyWaitSweep } from './jobs/journeyWaitSweep.js';
+import { processJourneyStuckRunSweep } from './jobs/journeyStuckRunSweep.js';
 import { processDeliverabilityRollup } from './jobs/deliverabilityRollup.js';
+import { closeProducerQueues } from './lib/queues.js';
 
 const concurrency = env.WORKER_CONCURRENCY;
 
@@ -83,6 +86,10 @@ const workers = [
     connection: redisConnection,
     concurrency: 1,
   }),
+  new Worker(QUEUE_JOURNEY_STUCK_RUN_SWEEP, processJourneyStuckRunSweep, {
+    connection: redisConnection,
+    concurrency: 1,
+  }),
   new Worker(QUEUE_DELIVERABILITY_ROLLUP, processDeliverabilityRollup, {
     connection: redisConnection,
     concurrency: 1,
@@ -119,6 +126,19 @@ void deliverabilityRollupQueue
 void deliverabilityRollupQueue
   .add(QUEUE_DELIVERABILITY_ROLLUP, {}, { jobId: 'boot:deliverability-rollup' })
   .catch(() => undefined);
+
+const stuckRunSweepQueue = new Queue(QUEUE_JOURNEY_STUCK_RUN_SWEEP, { connection: redisConnection });
+void stuckRunSweepQueue
+  .add(
+    QUEUE_JOURNEY_STUCK_RUN_SWEEP,
+    {},
+    {
+      // Hourly. Cheap query (indexed) so the cadence isn't load-sensitive.
+      repeat: { every: 60 * 60 * 1000 },
+      jobId: 'recurring:journey-stuck-run-sweep',
+    },
+  )
+  .catch((err) => logger.error({ err }, 'failed to register journey-stuck-run-sweep schedule'));
 
 for (const w of workers) {
   w.on('failed', (job: Job | undefined, err: Error) => {
@@ -171,7 +191,11 @@ async function shutdown(signal: string) {
   await sendEvents.close().catch(() => undefined);
   await sendQueue.close().catch(() => undefined);
   await waitSweepQueue.close().catch(() => undefined);
+  await stuckRunSweepQueue.close().catch(() => undefined);
   await deliverabilityRollupQueue.close().catch(() => undefined);
+  // Shared producer queues used by job files. Centralised here so all
+  // BullMQ Queue instances are closed on shutdown.
+  await closeProducerQueues();
   await redisConnection.quit().catch(() => undefined);
   await prisma.$disconnect().catch(() => undefined);
   process.exit(0);

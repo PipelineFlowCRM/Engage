@@ -6,18 +6,11 @@ import {
   QUEUE_JOURNEY_TRIGGER,
   type EventIngestJobData,
   type EventIngestJobResult,
-  type JourneyTriggerJobData,
 } from '@pipelineflow-engagement/shared';
-import type { Prisma } from '@prisma/client';
-import { Queue } from 'bullmq';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
-import { redisConnection } from '../lib/redis.js';
-
-const triggerQueue = new Queue<JourneyTriggerJobData>(
-  QUEUE_JOURNEY_TRIGGER,
-  { connection: redisConnection },
-);
+import { journeyTriggerQueue as triggerQueue } from '../lib/queues.js';
 
 export async function processEventIngest(
   job: Job<EventIngestJobData, EventIngestJobResult>,
@@ -36,9 +29,11 @@ export async function processEventIngest(
 
   const result = await prisma.$transaction(async (tx) => {
     // Per-subscriber serial lock so two concurrent identify() calls don't
-    // race the trait merge. Lock is released at tx commit.
+    // race the trait merge. Two-arg form gives us a fixed namespace
+    // (LOCK_NS.subscriber=3) so the 32-bit hashtext space can never
+    // collide with audience-compute or journey-run locks.
     await tx.$executeRawUnsafe(
-      `SELECT pg_advisory_xact_lock(hashtext($1))`,
+      `SELECT pg_advisory_xact_lock(3::int4, hashtext($1)::int4)`,
       externalId,
     );
 
@@ -96,25 +91,100 @@ export async function processEventIngest(
       }
     }
 
-    // alias(): redirect previousId's events to userId.
+    // alias(): merge previousId's identity into userId. Two correctness
+    // points the previous version got wrong:
+    //   1. If `sub` (the new userId row) doesn't exist yet, we must create
+    //      it BEFORE moving events — otherwise we'd null-out subscriberId
+    //      on every previous event (data loss).
+    //   2. We can't `subscriber.delete(prev)` because Delivery has
+    //      `onDelete: Cascade` — we'd nuke historic deliveries. Re-point
+    //      Deliveries (and SubscriptionState, AudienceMember, etc.) to
+    //      the new id, then delete the (now empty) prev row.
     if (data.type === 'alias') {
       if (data.previousId && data.externalId) {
         const prev = await tx.subscriber.findUnique({ where: { externalId: data.previousId } });
         if (prev && prev.externalId !== data.externalId) {
-          // Move events first (still safe — composite PK is (id, receivedAt)).
-          await tx.event.updateMany({
-            where: { subscriberId: prev.id },
-            data: { subscriberId: sub?.id ?? null },
-          });
-          // Merge anonymousIds + traits.
-          if (sub) {
+          // Ensure the new identity exists.
+          if (!sub) {
+            sub = await tx.subscriber.create({
+              data: {
+                externalId: data.externalId,
+                anonymousIds: prev.anonymousIds,
+                email: prev.email,
+                phone: prev.phone,
+                traits: (prev.traits as Prisma.InputJsonValue) ?? {},
+                source: data.source,
+              },
+            });
+          } else {
+            // Merge: existing-side wins on direct fields, prev fills gaps.
             const merged = { ...((prev.traits as object) ?? {}), ...((sub.traits as object) ?? {}) };
             const ids = Array.from(new Set([...prev.anonymousIds, ...sub.anonymousIds]));
-            await tx.subscriber.update({
+            sub = await tx.subscriber.update({
               where: { id: sub.id },
-              data: { traits: merged, anonymousIds: ids, updatedAt: new Date() },
+              data: {
+                traits: merged as Prisma.InputJsonValue,
+                anonymousIds: ids,
+                email: sub.email ?? prev.email,
+                phone: sub.phone ?? prev.phone,
+                updatedAt: new Date(),
+              },
             });
           }
+          // Re-point everything that referenced prev.id. Events first.
+          await tx.event.updateMany({
+            where: { subscriberId: prev.id },
+            data: { subscriberId: sub.id, externalId: sub.externalId },
+          });
+          // Deliveries: move so the cascade-delete on prev doesn't wipe
+          // historic message records.
+          await tx.delivery.updateMany({
+            where: { subscriberId: prev.id },
+            data: { subscriberId: sub.id },
+          });
+          // Subscription state: keep new-side rows; copy any prev-only
+          // groups across. Composite PK conflicts are silently ignored
+          // (the new side already has a state for that group).
+          const prevStates = await tx.subscriptionState.findMany({
+            where: { subscriberId: prev.id },
+          });
+          for (const ps of prevStates) {
+            await tx.subscriptionState
+              .create({
+                data: {
+                  subscriberId: sub.id,
+                  groupId: ps.groupId,
+                  status: ps.status,
+                  source: ps.source,
+                  changedAt: ps.changedAt,
+                },
+              })
+              .catch(() => undefined);
+          }
+          await tx.subscriptionState.deleteMany({ where: { subscriberId: prev.id } });
+          // Audience membership similarly.
+          const prevMembers = await tx.audienceMember.findMany({
+            where: { subscriberId: prev.id },
+          });
+          for (const am of prevMembers) {
+            await tx.audienceMember
+              .create({
+                data: {
+                  audienceId: am.audienceId,
+                  subscriberId: sub.id,
+                  enteredAt: am.enteredAt,
+                  computeVersion: am.computeVersion,
+                },
+              })
+              .catch(() => undefined);
+          }
+          await tx.audienceMember.deleteMany({ where: { subscriberId: prev.id } });
+          // SubscriberTrait lineage: re-point.
+          await tx.subscriberTrait.updateMany({
+            where: { subscriberId: prev.id },
+            data: { subscriberId: sub.id },
+          });
+          // Now safe to delete the empty prev row.
           await tx.subscriber.delete({ where: { id: prev.id } });
         }
       }

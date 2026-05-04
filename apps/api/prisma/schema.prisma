@@ -256,6 +256,12 @@ model Delivery {
   status            String     @default("queued")
   // SES Message-Id; UNIQUE so duplicate SNS notifications are idempotent.
   providerMessageId String?    @unique
+  // Caller-supplied idempotency anchor. UNIQUE so a job retry that re-runs
+  // sendTemplate with the same key short-circuits to the existing row
+  // instead of creating a second Delivery + double-sending. Format:
+  //   broadcasts:        "bd:<broadcastDeliveryId>"
+  //   journey messages:  "jr:<journeyRunId>:<nodeId>"
+  idempotencyKey    String?    @unique
   toEmail           String
   fromEmail         String
   subject           String?

@@ -5,6 +5,7 @@ import { asyncHandler, HttpError } from '../../lib/error.js';
 import { param } from '../../lib/params.js';
 import { verifyPreferencesToken } from '../../lib/preferencesJwt.js';
 import { enqueueCrmActivityPush } from '../../lib/queue.js';
+import { preferencesLimiter } from '../../lib/rateLimit.js';
 
 import '../_sideEffects.js';
 
@@ -16,6 +17,7 @@ export const preferencesRouter = Router();
 
 preferencesRouter.get(
   '/:token',
+  preferencesLimiter,
   asyncHandler(async (req, res) => {
     const payload = await verifyPreferencesToken(param(req, 'token'));
     const subscriberId = BigInt(payload.sub);
@@ -42,11 +44,20 @@ preferencesRouter.get(
 
 preferencesRouter.post(
   '/:token',
+  preferencesLimiter,
   asyncHandler(async (req, res) => {
     const payload = await verifyPreferencesToken(param(req, 'token'));
     const subscriberId = BigInt(payload.sub);
     const input = preferencesUpdateSchema.parse(req.body);
     const updates = Object.entries(input.subscriptions);
+    // Only allow toggling groups the subscriber has actually been sent
+    // into, or already has a SubscriptionState for. Blocks the abuse path
+    // where a leaked token opts the subscriber into arbitrary groups.
+    for (const [groupIdStr] of updates) {
+      const groupId = Number(groupIdStr);
+      if (!Number.isFinite(groupId)) throw new HttpError(400, 'Invalid groupId');
+      await assertPairAuthorized(subscriberId, groupId);
+    }
     await prisma.$transaction(async (tx) => {
       for (const [groupIdStr, status] of updates) {
         const groupId = Number(groupIdStr);
@@ -65,48 +76,68 @@ preferencesRouter.post(
 // a templateGroupId query param is present (auto-injected at render), uses
 // that. Mailbox providers (Gmail, Apple Mail) POST here without bodies via
 // the List-Unsubscribe-Post header.
+// Validate that the subscriber+group pair is plausible: either the
+// subscriber has actually received a Delivery routed through this group,
+// OR the group is what they currently have a SubscriptionState for. This
+// blocks the abuse path where someone with a leaked token can flip
+// subscriptions to groups the subscriber was never sent into.
+async function assertPairAuthorized(subscriberId: bigint, groupId: number): Promise<void> {
+  const [delivered, existing] = await Promise.all([
+    prisma.delivery.findFirst({
+      where: { subscriberId, template: { subscriptionGroupId: groupId } },
+      select: { id: true },
+    }),
+    prisma.subscriptionState.findUnique({
+      where: { subscriberId_groupId: { subscriberId, groupId } },
+      select: { subscriberId: true },
+    }),
+  ]);
+  if (!delivered && !existing) {
+    throw new HttpError(403, 'Subscriber has not been sent into this group');
+  }
+}
+
+async function unsubscribeViaList(subscriberId: bigint, groupId: number): Promise<void> {
+  await assertPairAuthorized(subscriberId, groupId);
+  await prisma.subscriptionState.upsert({
+    where: { subscriberId_groupId: { subscriberId, groupId } },
+    create: { subscriberId, groupId, status: 'unsubscribed', source: 'list-unsubscribe' },
+    update: { status: 'unsubscribed', source: 'list-unsubscribe', changedAt: new Date() },
+  });
+  const recent = await prisma.delivery.findFirst({
+    where: { subscriberId },
+    orderBy: { id: 'desc' },
+    select: { id: true },
+  });
+  if (recent) {
+    await enqueueCrmActivityPush({ deliveryId: recent.id.toString(), event: 'unsubscribed' });
+  }
+}
+
 preferencesRouter.get(
   '/:token/unsubscribe',
+  preferencesLimiter,
   asyncHandler(async (req, res) => {
     const payload = await verifyPreferencesToken(param(req, 'token'));
     const subscriberId = BigInt(payload.sub);
-    const groupIdRaw = req.query['groupId'];
-    const groupId = groupIdRaw ? Number(groupIdRaw) : null;
-    if (groupId == null || !Number.isFinite(groupId)) {
+    const groupId = Number(req.query['groupId']);
+    if (!Number.isFinite(groupId)) {
       throw new HttpError(400, 'Missing or invalid groupId');
     }
-    await prisma.subscriptionState.upsert({
-      where: { subscriberId_groupId: { subscriberId, groupId } },
-      create: { subscriberId, groupId, status: 'unsubscribed', source: 'list-unsubscribe' },
-      update: { status: 'unsubscribed', source: 'list-unsubscribe', changedAt: new Date() },
-    });
-    // Fan out to CRM. We don't have a specific Delivery row at unsubscribe
-    // time (the unsubscribe could have come from any past send), so we send
-    // the most recent Delivery to that subscriber as the canonical context.
-    const recent = await prisma.delivery.findFirst({
-      where: { subscriberId },
-      orderBy: { id: 'desc' },
-      select: { id: true },
-    });
-    if (recent) {
-      await enqueueCrmActivityPush({ deliveryId: recent.id.toString(), event: 'unsubscribed' });
-    }
+    await unsubscribeViaList(subscriberId, groupId);
     res.json({ unsubscribed: true });
   }),
 );
 preferencesRouter.post(
   '/:token/unsubscribe',
+  preferencesLimiter,
   asyncHandler(async (req, res) => {
-    // Same as GET — exists so List-Unsubscribe-Post one-click works.
+    // List-Unsubscribe-Post one-click — Gmail/Apple Mail post here without bodies.
     const payload = await verifyPreferencesToken(param(req, 'token'));
     const subscriberId = BigInt(payload.sub);
     const groupId = Number(req.query['groupId']);
     if (!Number.isFinite(groupId)) throw new HttpError(400, 'Missing groupId');
-    await prisma.subscriptionState.upsert({
-      where: { subscriberId_groupId: { subscriberId, groupId } },
-      create: { subscriberId, groupId, status: 'unsubscribed', source: 'list-unsubscribe' },
-      update: { status: 'unsubscribed', source: 'list-unsubscribe', changedAt: new Date() },
-    });
+    await unsubscribeViaList(subscriberId, groupId);
     res.status(204).end();
   }),
 );

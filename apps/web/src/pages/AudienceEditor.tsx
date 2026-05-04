@@ -41,6 +41,9 @@ export function AudienceEditor() {
   const [intervalMin, setIntervalMin] = useState(5);
   const [defText, setDefText] = useState(SAMPLE_DEFINITION);
   const [defError, setDefError] = useState<string | null>(null);
+  // Guard against background refetches reverting in-progress edits. We
+  // hydrate from `existing.data` exactly once.
+  const [hydrated, setHydrated] = useState(false);
 
   const existing = useQuery({
     queryKey: ['audience', id],
@@ -49,13 +52,15 @@ export function AudienceEditor() {
   });
 
   useEffect(() => {
+    if (hydrated) return;
     if (existing.data?.audience) {
       setName(existing.data.audience.name);
       setDescription(existing.data.audience.description ?? '');
       setIntervalMin(Math.round(existing.data.audience.computeIntervalSeconds / 60));
       setDefText(JSON.stringify(existing.data.audience.definition, null, 2));
+      setHydrated(true);
     }
-  }, [existing.data]);
+  }, [existing.data, hydrated]);
 
   const createMutation = useMutation({
     mutationFn: (body: object) => api.post('/audiences', body),
@@ -64,7 +69,12 @@ export function AudienceEditor() {
   });
   const updateMutation = useMutation({
     mutationFn: (body: object) => api.patch(`/audiences/${id}`, body),
-    onSuccess: () => { toast.success('Audience saved'); qc.invalidateQueries({ queryKey: ['audiences'] }); navigate('/audiences'); },
+    onSuccess: () => {
+      toast.success('Audience saved');
+      qc.invalidateQueries({ queryKey: ['audiences'] });
+      qc.invalidateQueries({ queryKey: ['audience', id] });
+      navigate('/audiences');
+    },
     onError: (err: Error) => toast.error(err.message),
   });
 

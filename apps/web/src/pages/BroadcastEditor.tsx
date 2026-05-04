@@ -35,19 +35,23 @@ export function BroadcastEditor() {
   const [templateId, setTemplateId] = useState<number | null>(null);
   const [scheduledFor, setScheduledFor] = useState('');
   const [rate, setRate] = useState(10);
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
+    if (hydrated) return;
     if (existing.data?.broadcast) {
       setName(existing.data.broadcast.name);
       setAudienceId(existing.data.broadcast.audienceId);
       setTemplateId(existing.data.broadcast.templateId);
       setScheduledFor(existing.data.broadcast.scheduledFor ?? '');
       setRate(existing.data.broadcast.sendRatePerSecond);
+      setHydrated(true);
     }
-  }, [existing.data]);
+  }, [existing.data, hydrated]);
 
   const save = useMutation({
     mutationFn: () => {
+      if (!isNew && !hydrated) throw new Error('Still loading; please wait');
       const body = {
         name,
         audienceId: audienceId!,
@@ -57,7 +61,12 @@ export function BroadcastEditor() {
       };
       return isNew ? api.post('/broadcasts', body) : api.patch(`/broadcasts/${id}`, body);
     },
-    onSuccess: () => { toast.success('Saved'); qc.invalidateQueries({ queryKey: ['broadcasts'] }); navigate('/broadcasts'); },
+    onSuccess: () => {
+      toast.success('Saved');
+      qc.invalidateQueries({ queryKey: ['broadcasts'] });
+      if (!isNew) qc.invalidateQueries({ queryKey: ['broadcast', id] });
+      navigate('/broadcasts');
+    },
     onError: (err: Error) => toast.error(err.message),
   });
 

@@ -95,12 +95,24 @@ subscribersRouter.patch(
   asyncHandler(async (req, res) => {
     const input = subscriberUpdateSchema.parse(req.body);
     const externalId = param(req, 'externalId');
+    // Merge semantics — consistent with POST and with the events ingest
+    // worker's identify() merge. Replacing would silently wipe every trait
+    // an operator hasn't included in this PATCH.
+    let traitsUpdate: Prisma.InputJsonValue | undefined;
+    if (input.traits) {
+      const existing = await prisma.subscriber.findUnique({
+        where: { externalId },
+        select: { traits: true },
+      });
+      const merged = { ...((existing?.traits as object) ?? {}), ...input.traits };
+      traitsUpdate = merged as Prisma.InputJsonValue;
+    }
     const sub = await prisma.subscriber.update({
       where: { externalId },
       data: {
         email: input.email ?? undefined,
         phone: input.phone ?? undefined,
-        traits: (input.traits ?? undefined) as Prisma.InputJsonValue | undefined,
+        traits: traitsUpdate,
       },
     });
     res.json({ subscriber: sub });

@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { relativeTime } from '@/lib/utils';
 
 interface Delivery {
@@ -20,15 +21,33 @@ interface Delivery {
   subscriber: { externalId: string; email: string | null };
 }
 
+interface Page {
+  deliveries: Delivery[];
+  nextCursor: string | null;
+}
+
 const STATUSES = ['queued', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained', 'unsubscribed', 'failed', 'suppressed'] as const;
 
 export function Deliveries() {
   const [status, setStatus] = useState('');
-  const { data, isLoading } = useQuery({
-    queryKey: ['deliveries', status],
-    queryFn: () => api.get<{ deliveries: Delivery[] }>(`/deliveries${status ? `?status=${status}` : ''}`),
-    refetchInterval: 5_000,
-  });
+  const { data, isLoading, hasNextPage, isFetchingNextPage, fetchNextPage } =
+    useInfiniteQuery({
+      queryKey: ['deliveries', status],
+      initialPageParam: '' as string,
+      queryFn: ({ pageParam }) => {
+        const params = new URLSearchParams();
+        if (status) params.set('status', status);
+        if (pageParam) params.set('cursor', pageParam);
+        const qs = params.toString();
+        return api.get<Page>(`/deliveries${qs ? `?${qs}` : ''}`);
+      },
+      getNextPageParam: (last) => last.nextCursor ?? undefined,
+      // Refetch only the first page on the polling interval — preserves
+      // pagination state and avoids ballooning the cache.
+      refetchInterval: 5_000,
+    });
+
+  const rows = data?.pages.flatMap((p) => p.deliveries) ?? [];
 
   return (
     <div>
@@ -56,8 +75,8 @@ export function Deliveries() {
               </thead>
               <tbody>
                 {isLoading ? <tr><td colSpan={5} className="px-4 py-6 text-muted-foreground">Loading…</td></tr>
-                : !data?.deliveries.length ? <tr><td colSpan={5} className="px-4 py-6 text-muted-foreground">No deliveries.</td></tr>
-                : data.deliveries.map((d) => (
+                : !rows.length ? <tr><td colSpan={5} className="px-4 py-6 text-muted-foreground">No deliveries.</td></tr>
+                : rows.map((d) => (
                   <tr key={d.id} className="border-b border-border/40 hover:bg-accent/40">
                     <td className="px-4 py-2.5">{d.toEmail}</td>
                     <td className="px-4 py-2.5">{d.subject ?? <span className="text-muted-foreground">—</span>}</td>
@@ -68,6 +87,17 @@ export function Deliveries() {
                 ))}
               </tbody>
             </table>
+            {hasNextPage ? (
+              <div className="flex justify-center border-t border-border/40 p-3">
+                <Button
+                  size="sm" variant="outline"
+                  onClick={() => fetchNextPage()}
+                  disabled={isFetchingNextPage}
+                >
+                  {isFetchingNextPage ? 'Loading…' : 'Load more'}
+                </Button>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
       </div>
