@@ -103,10 +103,15 @@ model SubscriberTrait {
 // Converted to a Timescale hypertable on receivedAt by the
 // 0002_event_hypertable migration. Compression + retention policies are
 // configured there. Prisma sees this as a regular table.
+//
+// Note on idempotency: Timescale forbids unique indexes on a hypertable
+// that don't include the partition key. We can't express
+// "UNIQUE messageId across all time" on this table, so dedup lives on
+// the separate `EventDedupe` table — see model below.
 model Event {
   id            BigInt   @default(autoincrement())
-  // Caller's idempotency key. Unique-on-non-null partial index added by
-  // the migration; can't express "unique partial" in Prisma directly.
+  // Mirror of the dedup row's messageId. Not unique here; lookup by
+  // messageId on this table goes through EventDedupe + a join.
   messageId     String?
   type          String   // 'track' | 'identify' | 'page' | 'screen' | 'group' | 'alias'
   subscriberId  BigInt?
@@ -125,6 +130,17 @@ model Event {
   @@id([id, receivedAt])
   @@index([subscriberId, observedAt])
   @@index([name, observedAt])
+  @@index([receivedAt])
+}
+
+// Idempotency anchor for events ingestion. Sits OFF the hypertable so we
+// can have a real PRIMARY KEY on messageId. The events ingest worker
+// inserts here first via ON CONFLICT DO NOTHING; if a row was inserted,
+// the Event row is written; otherwise the event is treated as a replay.
+model EventDedupe {
+  messageId  String   @id
+  receivedAt DateTime @default(now())
+
   @@index([receivedAt])
 }
 

@@ -101,9 +101,20 @@ CREATE TABLE "Event" (
 CREATE INDEX "Event_subscriberId_observedAt_idx" ON "Event"("subscriberId", "observedAt");
 CREATE INDEX "Event_name_observedAt_idx" ON "Event"("name", "observedAt");
 CREATE INDEX "Event_receivedAt_idx" ON "Event"("receivedAt");
--- Idempotency: messageId must be unique among non-null values. Partial
--- unique index because most events from older clients won't carry one.
-CREATE UNIQUE INDEX "Event_messageId_key" ON "Event"("messageId") WHERE "messageId" IS NOT NULL;
+-- Plain (non-unique) index on messageId for lookup paths. Uniqueness
+-- lives on EventDedupe — see comment below.
+CREATE INDEX "Event_messageId_idx" ON "Event"("messageId") WHERE "messageId" IS NOT NULL;
+
+-- EventDedupe — idempotency anchor for events ingestion. Off the hypertable
+-- so we can have a real PRIMARY KEY on messageId. Timescale forbids unique
+-- indexes on a hypertable that don't include the partition key, so we move
+-- the dedup off-table. The events ingest worker inserts here first via
+-- ON CONFLICT DO NOTHING; on conflict it skips the Event insert.
+CREATE TABLE "EventDedupe" (
+  "messageId" TEXT PRIMARY KEY,
+  "receivedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX "EventDedupe_receivedAt_idx" ON "EventDedupe"("receivedAt");
 
 -- Audience
 CREATE TABLE "Audience" (

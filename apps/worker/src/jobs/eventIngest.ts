@@ -215,7 +215,21 @@ export async function processEventIngest(
 
     // Insert the Event row. Idempotent via partial unique index on messageId.
     // Use raw SQL for ON CONFLICT (Prisma can't express partial uniques).
-    const inserted = await tx.$executeRaw`
+    // Dedup via EventDedupe (a non-hypertable). Timescale forbids unique
+    // indexes on the hypertable that don't include the partition key, so
+    // dedup lives off-table. INSERT...ON CONFLICT DO NOTHING; if no row
+    // was inserted, the messageId was seen before — replay, skip.
+    let dedupeInserted = 1;
+    if (data.messageId) {
+      dedupeInserted = await tx.$executeRaw`
+        INSERT INTO "EventDedupe" ("messageId") VALUES (${data.messageId})
+        ON CONFLICT DO NOTHING
+      `;
+    }
+    if (dedupeInserted === 0) {
+      return { outcome: 'duplicate', subscriberId: sub?.id?.toString() } as const;
+    }
+    await tx.$executeRaw`
       INSERT INTO "Event" (
         "messageId", "type", "subscriberId", "anonymousId", "externalId",
         "name", "properties", "context", "observedAt", "receivedAt", "source"
@@ -232,9 +246,8 @@ export async function processEventIngest(
         ${new Date(data.receivedAt)},
         ${data.source}
       )
-      ON CONFLICT ("messageId") WHERE "messageId" IS NOT NULL DO NOTHING
     `;
-    return { outcome: inserted > 0 ? 'inserted' : 'duplicate', subscriberId: sub?.id?.toString() } as const;
+    return { outcome: 'inserted', subscriberId: sub?.id?.toString() } as const;
   });
 
   if (result.outcome === 'duplicate') {

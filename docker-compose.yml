@@ -20,10 +20,12 @@
 
 services:
   postgres:
-    # TimescaleDB-HA bundles Postgres 16 + the timescaledb extension. On the
-    # first boot, postgres-init applies CREATE EXTENSION via our 0001
-    # migration and the 0002 migration converts Event into a hypertable.
-    image: timescale/timescaledb-ha:pg16
+    # TimescaleDB OSS image — Postgres 16 + the timescaledb extension. The
+    # -ha variant bundles pgvector / postgis / hot-standby etc. (~1.7GB)
+    # which we don't need. The OSS image is ~150MB. On first boot,
+    # postgres-init applies CREATE EXTENSION via the 0001 migration and
+    # the 0002 migration converts Event into a hypertable.
+    image: timescale/timescaledb:latest-pg16
     container_name: pfengagement-postgres
     restart: unless-stopped
     environment:
@@ -31,7 +33,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
       POSTGRES_DB: ${POSTGRES_DB:-pfengagement}
     volumes:
-      - pfengagement-pgdata:/home/postgres/pgdata/data
+      # Standard Postgres data path. (The timescale-ha image uses
+      # /home/postgres/pgdata/data instead — switch back if you ever
+      # change the image.)
+      - pfengagement-pgdata:/var/lib/postgresql/data
     ports:
       - '${BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5440}:5432'
     healthcheck:
@@ -108,10 +113,17 @@ services:
       dockerfile: apps/worker/Dockerfile
     container_name: pfengagement-worker
     restart: unless-stopped
+    # Wait for api to pass its healthcheck before starting. The api owns
+    # migrations (apps/api/scripts/start.sh runs `prisma migrate deploy`
+    # before binding the HTTP port), so an api-healthy gate guarantees
+    # the worker boots after the schema is in place. Without this, the
+    # wait-sweep cron fires once at boot before tables exist.
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      api:
         condition: service_healthy
     environment:
       NODE_ENV: production
