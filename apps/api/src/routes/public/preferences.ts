@@ -4,6 +4,7 @@ import { prisma } from '../../db.js';
 import { asyncHandler, HttpError } from '../../lib/error.js';
 import { param } from '../../lib/params.js';
 import { verifyPreferencesToken } from '../../lib/preferencesJwt.js';
+import { enqueueCrmActivityPush } from '../../lib/queue.js';
 
 import '../_sideEffects.js';
 
@@ -79,6 +80,17 @@ preferencesRouter.get(
       create: { subscriberId, groupId, status: 'unsubscribed', source: 'list-unsubscribe' },
       update: { status: 'unsubscribed', source: 'list-unsubscribe', changedAt: new Date() },
     });
+    // Fan out to CRM. We don't have a specific Delivery row at unsubscribe
+    // time (the unsubscribe could have come from any past send), so we send
+    // the most recent Delivery to that subscriber as the canonical context.
+    const recent = await prisma.delivery.findFirst({
+      where: { subscriberId },
+      orderBy: { id: 'desc' },
+      select: { id: true },
+    });
+    if (recent) {
+      await enqueueCrmActivityPush({ deliveryId: recent.id.toString(), event: 'unsubscribed' });
+    }
     res.json({ unsubscribed: true });
   }),
 );

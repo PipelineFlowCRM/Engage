@@ -17,6 +17,7 @@ import { subscribersRouter } from './routes/subscribers.js';
 import { audiencesRouter } from './routes/audiences.js';
 import { templatesRouter } from './routes/templates.js';
 import { broadcastsRouter } from './routes/broadcasts.js';
+import { journeysRouter } from './routes/journeys.js';
 import { subscriptionGroupsRouter } from './routes/subscriptionGroups.js';
 import { suppressionsRouter } from './routes/suppressions.js';
 import { secretsRouter } from './routes/secrets.js';
@@ -85,6 +86,7 @@ export function buildApp() {
   app.use('/api/audiences', audiencesRouter);
   app.use('/api/templates', templatesRouter);
   app.use('/api/broadcasts', broadcastsRouter);
+  app.use('/api/journeys', journeysRouter);
   app.use('/api/subscription-groups', subscriptionGroupsRouter);
   app.use('/api/suppressions', suppressionsRouter);
   app.use('/api/secrets', secretsRouter);

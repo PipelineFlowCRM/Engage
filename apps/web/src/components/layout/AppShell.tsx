@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
-  LayoutDashboard, Users, Filter, Mail, Send, ListChecks, ShieldOff, Key, Lock, Inbox, LogOut, Settings,
+  LayoutDashboard, Users, Filter, Mail, Send, GitBranch, ListChecks, ShieldOff, Key, Lock, Inbox, LogOut, Settings,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
@@ -12,6 +12,7 @@ const nav = [
   { to: '/audiences', label: 'Audiences', icon: Filter },
   { to: '/templates', label: 'Templates', icon: Mail },
   { to: '/broadcasts', label: 'Broadcasts', icon: Send },
+  { to: '/journeys', label: 'Journeys', icon: GitBranch },
   { to: '/deliveries', label: 'Deliveries', icon: Inbox },
 ] as const;
 

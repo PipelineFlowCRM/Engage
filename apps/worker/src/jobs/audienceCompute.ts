@@ -3,12 +3,24 @@
 // AudienceMember via INSERT … ON CONFLICT + DELETE-by-stale-version.
 
 import type { Job } from 'bullmq';
-import type { AudienceComputeJobData, AudienceComputeJobResult } from '@pipelineflow-engagement/shared';
-import { audienceDefinitionSchema } from '@pipelineflow-engagement/shared';
+import {
+  audienceDefinitionSchema,
+  QUEUE_JOURNEY_TRIGGER,
+  type AudienceComputeJobData,
+  type AudienceComputeJobResult,
+  type JourneyTriggerJobData,
+} from '@pipelineflow-engagement/shared';
 import { Prisma } from '@prisma/client';
+import { Queue } from 'bullmq';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
+import { redisConnection } from '../lib/redis.js';
 import { compileAudience } from '../lib/audienceCompiler.js';
+
+const triggerQueue = new Queue<JourneyTriggerJobData>(
+  QUEUE_JOURNEY_TRIGGER,
+  { connection: redisConnection },
+);
 
 export async function processAudienceCompute(
   job: Job<AudienceComputeJobData, AudienceComputeJobResult>,
@@ -59,14 +71,20 @@ export async function processAudienceCompute(
     let membersRemoved = 0;
     let totalMembers = 0;
     let computeError: string | null = null;
+    // Captured for journey-trigger fan-out below. Bigints serialised to
+    // strings since the trigger payload is JSON-serialised by BullMQ.
+    let enteredIds: string[] = [];
+    let exitedIds: string[] = [];
     try {
-      // Use $executeRawUnsafe; Prisma's tagged-template raw doesn't support
-      // dynamic placeholders cleanly when the SQL itself is dynamic.
-      await prisma.$executeRawUnsafe(upsert, ...params, audienceId, newVersion);
+      // Upsert with RETURNING xmax = 0 to distinguish freshly-inserted
+      // (entered) from updates (already-members).
+      const upsertReturning = `${upsert} RETURNING "subscriberId"::text AS sid, (xmax = 0) AS just_inserted`;
+      const upsertRows = await prisma.$queryRawUnsafe<
+        Array<{ sid: string; just_inserted: boolean }>
+      >(upsertReturning, ...params, audienceId, newVersion);
+      enteredIds = upsertRows.filter((r) => r.just_inserted).map((r) => r.sid);
 
-      // Count delta. Members where computeVersion was bumped this pass were
-      // existing-or-newly-inserted. We need to distinguish — so first count
-      // current total at new version, then subtract prior count to get net.
+      // Total at new version.
       const totalRows = await prisma.$queryRawUnsafe<Array<{ c: bigint }>>(
         `SELECT COUNT(*)::bigint AS c FROM "AudienceMember" WHERE "audienceId" = $1 AND "computeVersion" = $2`,
         audienceId, newVersion,
@@ -74,16 +92,15 @@ export async function processAudienceCompute(
       totalMembers = Number(totalRows[0]?.c ?? 0n);
 
       // Deletes: rows we didn't touch this pass.
-      const deleted = await prisma.$queryRawUnsafe<Array<{ c: bigint }>>(
-        `WITH d AS (
-           DELETE FROM "AudienceMember"
-           WHERE "audienceId" = $1 AND "computeVersion" < $2
-           RETURNING 1
-         ) SELECT COUNT(*)::bigint AS c FROM d`,
+      const deleted = await prisma.$queryRawUnsafe<Array<{ sid: string }>>(
+        `DELETE FROM "AudienceMember"
+         WHERE "audienceId" = $1 AND "computeVersion" < $2
+         RETURNING "subscriberId"::text AS sid`,
         audienceId, newVersion,
       );
-      membersRemoved = Number(deleted[0]?.c ?? 0n);
-      membersAdded = Math.max(0, totalMembers - (audience.memberCount - membersRemoved));
+      exitedIds = deleted.map((r) => r.sid);
+      membersRemoved = exitedIds.length;
+      membersAdded = enteredIds.length;
     } catch (err) {
       logger.error({ err, audienceId }, 'audience compute SQL failed');
       computeError = err instanceof Error ? err.message : String(err);
@@ -100,6 +117,22 @@ export async function processAudienceCompute(
           lastComputeError: computeError,
         },
       });
+    }
+
+    // Journey trigger fan-out. Done outside the lock-protected region so the
+    // advisory lock isn't held while we enqueue. Per-subscriber jobs let the
+    // trigger worker's run-start dedup do the heavy lifting; we just throw
+    // them all in. Stored-storms guardrail is enforced in the trigger
+    // worker itself (a later concurrency cap on the queue worker) — Phase 3.
+    for (const sid of enteredIds) {
+      await triggerQueue
+        .add(QUEUE_JOURNEY_TRIGGER, { kind: 'audience-enter', audienceId, subscriberId: sid })
+        .catch((err) => logger.warn({ err, sid, audienceId }, 'failed to enqueue audience-enter trigger'));
+    }
+    for (const sid of exitedIds) {
+      await triggerQueue
+        .add(QUEUE_JOURNEY_TRIGGER, { kind: 'audience-exit', audienceId, subscriberId: sid })
+        .catch((err) => logger.warn({ err, sid, audienceId }, 'failed to enqueue audience-exit trigger'));
     }
 
     return {

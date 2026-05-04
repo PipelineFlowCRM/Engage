@@ -1,6 +1,6 @@
 // Worker entry. One BullMQ Worker per queue; concurrency tuned per queue.
 
-import { Worker, Queue, type Job } from 'bullmq';
+import { Worker, Queue, QueueEvents, type Job } from 'bullmq';
 import {
   QUEUE_AUDIENCE_COMPUTE,
   QUEUE_BROADCAST_BATCH,
@@ -8,6 +8,9 @@ import {
   QUEUE_BROADCAST_SEND,
   QUEUE_CRM_ACTIVITY_PUSH,
   QUEUE_EVENT_INGEST,
+  QUEUE_JOURNEY_TICK,
+  QUEUE_JOURNEY_TRIGGER,
+  QUEUE_JOURNEY_WAIT_SWEEP,
   QUEUE_SES_QUOTA_POLL,
 } from '@pipelineflow-engagement/shared';
 import { env } from './env.js';
@@ -21,6 +24,9 @@ import { processBroadcastBatch } from './jobs/broadcastBatch.js';
 import { processBroadcastSend } from './jobs/broadcastSend.js';
 import { processSesQuotaPoll } from './jobs/sesQuotaPoll.js';
 import { processCrmActivityPush } from './jobs/crmActivityPush.js';
+import { processJourneyTick } from './jobs/journeyTick.js';
+import { processJourneyTrigger } from './jobs/journeyTrigger.js';
+import { processJourneyWaitSweep } from './jobs/journeyWaitSweep.js';
 
 const concurrency = env.WORKER_CONCURRENCY;
 
@@ -60,7 +66,36 @@ const workers = [
     connection: redisConnection,
     concurrency: 2,
   }),
+  // Journey runner. Tick processes one run at a time per id (the row-level
+  // lock makes any concurrency level safe), but we cap to keep DB pool
+  // pressure manageable.
+  new Worker(QUEUE_JOURNEY_TICK, processJourneyTick, {
+    connection: redisConnection,
+    concurrency,
+  }),
+  new Worker(QUEUE_JOURNEY_TRIGGER, processJourneyTrigger, {
+    connection: redisConnection,
+    concurrency: 4,
+  }),
+  new Worker(QUEUE_JOURNEY_WAIT_SWEEP, processJourneyWaitSweep, {
+    connection: redisConnection,
+    concurrency: 1,
+  }),
 ];
+
+// Register the wait-sweep cron once on boot. BullMQ dedupes repeatables by
+// jobId, so multi-instance worker deploys converge on a single schedule.
+const waitSweepQueue = new Queue(QUEUE_JOURNEY_WAIT_SWEEP, { connection: redisConnection });
+void waitSweepQueue
+  .add(
+    QUEUE_JOURNEY_WAIT_SWEEP,
+    {},
+    {
+      repeat: { every: 30_000 },
+      jobId: 'recurring:journey-wait-sweep',
+    },
+  )
+  .catch((err) => logger.error({ err }, 'failed to register journey-wait-sweep schedule'));
 
 for (const w of workers) {
   w.on('failed', (job: Job | undefined, err: Error) => {
@@ -81,7 +116,6 @@ logger.info({ workers: workers.map((w) => w.name), concurrency }, 'worker starte
 // but the BroadcastDelivery row is still 'pending'. This QueueEvents listener
 // flips the row to 'failed' so the inbox reflects reality.
 const sendQueue = new Queue(QUEUE_BROADCAST_SEND, { connection: redisConnection });
-import { QueueEvents } from 'bullmq';
 const sendEvents = new QueueEvents(QUEUE_BROADCAST_SEND, { connection: redisConnection });
 sendEvents.on('failed', async ({ jobId, failedReason }) => {
   if (!jobId) return;
@@ -113,6 +147,7 @@ async function shutdown(signal: string) {
   await Promise.allSettled(workers.map((w) => w.close()));
   await sendEvents.close().catch(() => undefined);
   await sendQueue.close().catch(() => undefined);
+  await waitSweepQueue.close().catch(() => undefined);
   await redisConnection.quit().catch(() => undefined);
   await prisma.$disconnect().catch(() => undefined);
   process.exit(0);

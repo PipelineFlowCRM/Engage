@@ -2,10 +2,22 @@
 // write Event row idempotently (ON CONFLICT messageId DO NOTHING).
 
 import type { Job } from 'bullmq';
-import type { EventIngestJobData, EventIngestJobResult } from '@pipelineflow-engagement/shared';
+import {
+  QUEUE_JOURNEY_TRIGGER,
+  type EventIngestJobData,
+  type EventIngestJobResult,
+  type JourneyTriggerJobData,
+} from '@pipelineflow-engagement/shared';
 import type { Prisma } from '@prisma/client';
+import { Queue } from 'bullmq';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
+import { redisConnection } from '../lib/redis.js';
+
+const triggerQueue = new Queue<JourneyTriggerJobData>(
+  QUEUE_JOURNEY_TRIGGER,
+  { connection: redisConnection },
+);
 
 export async function processEventIngest(
   job: Job<EventIngestJobData, EventIngestJobResult>,
@@ -158,6 +170,26 @@ export async function processEventIngest(
   if (result.outcome === 'duplicate') {
     logger.debug({ messageId: data.messageId }, 'event already ingested');
   }
+
+  // Journey trigger fan-out. Only for newly-inserted track() events with a
+  // resolved subscriber. Identify/page/alias don't drive entry/wait matches
+  // in Phase 2.
+  if (
+    result.outcome === 'inserted' &&
+    data.type === 'track' &&
+    data.name &&
+    result.subscriberId
+  ) {
+    await triggerQueue
+      .add(QUEUE_JOURNEY_TRIGGER, {
+        kind: 'event',
+        event: data.name,
+        subscriberId: result.subscriberId,
+        eventMessageId: data.messageId,
+      })
+      .catch((err) => logger.warn({ err, event: data.name }, 'failed to enqueue event trigger'));
+  }
+
   return result;
 }
 

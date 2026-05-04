@@ -70,14 +70,31 @@ export type CrmActivityPushJobData = {
   event: 'sent' | 'delivered' | 'opened' | 'clicked' | 'bounced' | 'complained' | 'unsubscribed' | 'failed';
 };
 
-// ─── Phase 2 journey runner (declared early so types compile across phases) ─
+// ─── Phase 2 journey runner ───────────────────────────────────────────────
 export const QUEUE_JOURNEY_TICK = 'engagement-journey-tick' as const;
 export const QUEUE_JOURNEY_WAIT_SWEEP = 'engagement-journey-wait-sweep' as const;
+export const QUEUE_JOURNEY_TRIGGER = 'engagement-journey-trigger' as const;
+
+// Tick: advance a single run by one node (or hot-loop a few non-delayed
+// nodes). Idempotent at the worker entry point via expectedNodeId +
+// expectedVersionId — duplicate jobs return without acting.
 export type JourneyTickJobData = {
   runId: string;               // BigInt as string
   expectedNodeId: string;
   expectedVersionId: number;
 };
+
+// Trigger: dual-purpose dispatch.
+//   - 'audience-enter' / 'event' may start a new JourneyRun (entry-node match).
+//   - 'audience-enter' / 'audience-exit' / 'event' may also resume a waiting
+//     run (matching JourneyWait).
+// 'audience-exit' is wait-only — exiting an audience doesn't start a run.
+// Run-start dedup: (journeyId, subscriberId, versionId) UNIQUE on JourneyRun.
+// Wait-resume dedup: runId UNIQUE on JourneyWait.
+export type JourneyTriggerJobData =
+  | { kind: 'audience-enter'; audienceId: number; subscriberId: string }
+  | { kind: 'audience-exit'; audienceId: number; subscriberId: string }
+  | { kind: 'event'; event: string; subscriberId: string; eventMessageId: string };
 
 // ─── Smoke-test queue (env-gated; mirrors CRM `generate`) ──────────────────
 export const QUEUE_GENERATE = 'engagement-generate' as const;

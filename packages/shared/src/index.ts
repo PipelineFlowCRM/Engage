@@ -4,6 +4,7 @@ export * from './events.js';
 export * from './subscribers.js';
 export * from './audiences.js';
 export * from './templates.js';
+export * from './journeys.js';
 export * from './broadcasts.js';
 export * from './subscriptionGroups.js';
 export * from './secrets.js';

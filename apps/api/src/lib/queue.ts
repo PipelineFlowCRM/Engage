@@ -9,6 +9,7 @@ import {
   QUEUE_EVENT_INGEST,
   QUEUE_GENERATE,
   QUEUE_JOURNEY_TICK,
+  QUEUE_JOURNEY_TRIGGER,
   QUEUE_JOURNEY_WAIT_SWEEP,
   QUEUE_SES_QUOTA_POLL,
   type AudienceComputeJobData,
@@ -22,6 +23,7 @@ import {
   type GenerateJobData,
   type GenerateJobResult,
   type JourneyTickJobData,
+  type JourneyTriggerJobData,
   type SesQuotaPollJobData,
 } from '@pipelineflow-engagement/shared';
 import { env } from '../env.js';
@@ -123,15 +125,40 @@ export const crmActivityPushQueue = new Queue<CrmActivityPushJobData>(
   },
 );
 
-// ─── Journey runner queues (declared early — workers ship in Phase 2) ────
+// ─── Journey runner queues ────────────────────────────────────────────────
+// Tick: advance one run by one node. Custom JobsOptions: keep attempts
+// modest because the runner is row-locked and replay-safe via expectedNodeId.
 export const journeyTickQueue = new Queue<JourneyTickJobData>(QUEUE_JOURNEY_TICK, {
   connection: redisConnection,
-  defaultJobOptions,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 5_000 },
+    removeOnComplete: { age: 3_600, count: 5_000 },
+    removeOnFail: { age: 7 * 86_400 },
+  },
 });
+// Wait sweep: a recurring tick (every 30s) that fires timeout branches for
+// JourneyWait rows whose expiresAt has passed. attempts=1 because the next
+// tick picks up anything missed.
 export const journeyWaitSweepQueue = new Queue(QUEUE_JOURNEY_WAIT_SWEEP, {
   connection: redisConnection,
   defaultJobOptions: { attempts: 1, removeOnComplete: { age: 3_600, count: 60 } },
 });
+// Trigger: starts a new run (or no-ops if one already exists for the
+// (journey, subscriber, version) tuple). Producer is the audience compute
+// job (audience-enter) and the events ingest worker (event entry match).
+export const journeyTriggerQueue = new Queue<JourneyTriggerJobData>(
+  QUEUE_JOURNEY_TRIGGER,
+  {
+    connection: redisConnection,
+    defaultJobOptions: {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 2_000 },
+      removeOnComplete: { age: 3_600, count: 5_000 },
+      removeOnFail: { age: 7 * 86_400 },
+    },
+  },
+);
 
 // ─── Smoke-test queue (env-gated) ────────────────────────────────────────
 export const generateQueue = new Queue<GenerateJobData, GenerateJobResult>(
@@ -148,6 +175,7 @@ export const allQueues = [
   sesQuotaPollQueue,
   crmActivityPushQueue,
   journeyTickQueue,
+  journeyTriggerQueue,
   journeyWaitSweepQueue,
   generateQueue,
 ];

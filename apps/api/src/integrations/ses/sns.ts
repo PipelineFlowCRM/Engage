@@ -10,6 +10,7 @@ import { createVerify } from 'node:crypto';
 import { request as httpsRequest } from 'node:https';
 import type { PrismaClient } from '@prisma/client';
 import { logger } from '../../lib/logger.js';
+import { enqueueCrmActivityPush } from '../../lib/queue.js';
 
 interface SnsBase {
   Type: string;
@@ -221,5 +222,30 @@ export async function handleSesNotification(
   });
   if (updated.count === 0) {
     logger.info({ messageId, eventKind }, 'ses notification: no matching delivery row yet');
+    return;
   }
+
+  // Fan out to CRM activity push (Phase 2). Lookup the just-updated row by
+  // providerMessageId — we need its id for the queue payload. Skipped
+  // automatically by the worker if CRM_BASE_URL isn't configured or the
+  // subscriber isn't a CRM contact.
+  const eventKindToActivity: Record<string, 'sent' | 'delivered' | 'opened' | 'clicked' | 'bounced' | 'complained' | 'failed'> = {
+    Delivery: 'delivered',
+    Open: 'opened',
+    Click: 'clicked',
+    Bounce: 'bounced',
+    Complaint: 'complained',
+    Reject: 'failed',
+  };
+  const activity = eventKindToActivity[eventKind];
+  if (!activity) return;
+  const row = await prisma.delivery.findUnique({
+    where: { providerMessageId: messageId },
+    select: { id: true },
+  });
+  if (!row) return;
+  await enqueueCrmActivityPush({
+    deliveryId: row.id.toString(),
+    event: activity,
+  });
 }

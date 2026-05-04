@@ -13,6 +13,9 @@ import { TemplateEditor } from '@/pages/TemplateEditor';
 import { Broadcasts } from '@/pages/Broadcasts';
 import { BroadcastEditor } from '@/pages/BroadcastEditor';
 import { BroadcastDetail } from '@/pages/BroadcastDetail';
+import { Journeys } from '@/pages/Journeys';
+import { JourneyEditor } from '@/pages/JourneyEditor';
+import { JourneyDetail } from '@/pages/JourneyDetail';
 import { Deliveries } from '@/pages/Deliveries';
 import { SubscriptionGroups } from '@/pages/SubscriptionGroups';
 import { Suppressions } from '@/pages/Suppressions';
@@ -41,6 +44,10 @@ export function App() {
         <Route path="/broadcasts/new" element={<BroadcastEditor />} />
         <Route path="/broadcasts/:id" element={<BroadcastDetail />} />
         <Route path="/broadcasts/:id/edit" element={<BroadcastEditor />} />
+        <Route path="/journeys" element={<Journeys />} />
+        <Route path="/journeys/new" element={<JourneyEditor />} />
+        <Route path="/journeys/:id" element={<JourneyDetail />} />
+        <Route path="/journeys/:id/edit" element={<JourneyEditor />} />
         <Route path="/deliveries" element={<Deliveries />} />
         <Route path="/settings/profile" element={<Profile />} />
         <Route path="/settings/subscription-groups" element={<SubscriptionGroups />} />
