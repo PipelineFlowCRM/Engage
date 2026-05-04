@@ -6,6 +6,7 @@ import {
   QUEUE_BROADCAST_LAUNCH,
   QUEUE_BROADCAST_SEND,
   QUEUE_CRM_ACTIVITY_PUSH,
+  QUEUE_DELIVERABILITY_ROLLUP,
   QUEUE_EVENT_INGEST,
   QUEUE_GENERATE,
   QUEUE_JOURNEY_TICK,
@@ -98,6 +99,18 @@ export const broadcastSendQueue = new Queue<BroadcastSendJobData>(
   },
 );
 
+// ─── Deliverability rollup ───────────────────────────────────────────────
+// Producer-side handle so Bull Board can list the queue. The repeating
+// schedule is registered by the worker on boot.
+export const deliverabilityRollupQueue = new Queue(QUEUE_DELIVERABILITY_ROLLUP, {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 1,
+    removeOnComplete: { age: 24 * 3_600, count: 50 },
+    removeOnFail: { age: 7 * 86_400 },
+  },
+});
+
 // ─── SES quota poll ──────────────────────────────────────────────────────
 export const sesQuotaPollQueue = new Queue<SesQuotaPollJobData>(
   QUEUE_SES_QUOTA_POLL,
@@ -177,6 +190,7 @@ export const allQueues = [
   journeyTickQueue,
   journeyTriggerQueue,
   journeyWaitSweepQueue,
+  deliverabilityRollupQueue,
   generateQueue,
 ];
 

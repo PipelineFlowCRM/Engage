@@ -22,6 +22,13 @@ const triggerQueue = new Queue<JourneyTriggerJobData>(
   { connection: redisConnection },
 );
 
+// Hard cap on per-pass journey-trigger fan-out. Hit when an audience
+// definition flips a large set of subscribers in one compute (typical
+// cause: trait import). Surfaced in Audience.lastComputeWarning so the
+// operator can investigate. Tuneable via env later if needed; 5000 is
+// chosen to keep one pass under ~5 seconds of enqueue work.
+const MAX_TRIGGER_FAN_OUT = 5_000;
+
 export async function processAudienceCompute(
   job: Job<AudienceComputeJobData, AudienceComputeJobResult>,
 ): Promise<AudienceComputeJobResult> {
@@ -106,6 +113,24 @@ export async function processAudienceCompute(
       computeError = err instanceof Error ? err.message : String(err);
       throw err;
     } finally {
+      // ─── Storm guardrail ──────────────────────────────────────────────
+      // A trait import that flips 100k subscribers into an audience would
+      // otherwise enqueue 100k journey-trigger jobs. We cap at
+      // MAX_TRIGGER_FAN_OUT per pass and surface the cap in
+      // Audience.lastComputeWarning so the operator notices.
+      const warnings: string[] = [];
+      if (enteredIds.length > MAX_TRIGGER_FAN_OUT) {
+        warnings.push(
+          `Capped at ${MAX_TRIGGER_FAN_OUT}/${enteredIds.length} audience-enter triggers — consider tightening the audience or splitting into batches`,
+        );
+        enteredIds = enteredIds.slice(0, MAX_TRIGGER_FAN_OUT);
+      }
+      if (exitedIds.length > MAX_TRIGGER_FAN_OUT) {
+        warnings.push(
+          `Capped at ${MAX_TRIGGER_FAN_OUT}/${exitedIds.length} audience-exit triggers`,
+        );
+        exitedIds = exitedIds.slice(0, MAX_TRIGGER_FAN_OUT);
+      }
       const durationMs = Date.now() - start;
       await prisma.audience.update({
         where: { id: audienceId },
@@ -115,15 +140,15 @@ export async function processAudienceCompute(
           lastComputedAt: new Date(),
           lastComputeMs: durationMs,
           lastComputeError: computeError,
+          lastComputeWarning: warnings.length ? warnings.join('; ') : null,
         },
       });
     }
 
     // Journey trigger fan-out. Done outside the lock-protected region so the
     // advisory lock isn't held while we enqueue. Per-subscriber jobs let the
-    // trigger worker's run-start dedup do the heavy lifting; we just throw
-    // them all in. Stored-storms guardrail is enforced in the trigger
-    // worker itself (a later concurrency cap on the queue worker) — Phase 3.
+    // trigger worker's run-start dedup do the heavy lifting; counts are
+    // already capped above by the storm guardrail.
     for (const sid of enteredIds) {
       await triggerQueue
         .add(QUEUE_JOURNEY_TRIGGER, { kind: 'audience-enter', audienceId, subscriberId: sid })

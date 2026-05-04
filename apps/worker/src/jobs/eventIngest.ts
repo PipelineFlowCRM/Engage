@@ -186,6 +186,7 @@ export async function processEventIngest(
         event: data.name,
         subscriberId: result.subscriberId,
         eventMessageId: data.messageId,
+        properties: data.properties ?? null,
       })
       .catch((err) => logger.warn({ err, event: data.name }, 'failed to enqueue event trigger'));
   }

@@ -16,6 +16,7 @@ interface Audience {
   computeIntervalSeconds: number;
   lastComputedAt: string | null;
   lastComputeError: string | null;
+  lastComputeWarning: string | null;
 }
 
 export function Audiences() {
@@ -63,6 +64,11 @@ export function Audiences() {
                       <Link to={`/audiences/${a.id}`} className="hover:underline">{a.name}</Link>
                       {a.lastComputeError ? (
                         <div className="mt-1 text-xs text-destructive truncate max-w-md">{a.lastComputeError}</div>
+                      ) : null}
+                      {a.lastComputeWarning ? (
+                        <div className="mt-1 text-xs text-warning truncate max-w-md" title={a.lastComputeWarning}>
+                          ⚠ {a.lastComputeWarning}
+                        </div>
                       ) : null}
                     </td>
                     <td className="px-4 py-2.5 tabular-nums">{formatNumber(a.memberCount)}</td>

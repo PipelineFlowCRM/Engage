@@ -63,6 +63,13 @@ export type BroadcastSendJobData = {
 export const QUEUE_SES_QUOTA_POLL = 'engagement-ses-quota-poll' as const;
 export type SesQuotaPollJobData = Record<string, never>;
 
+// ─── Deliverability rollup ─────────────────────────────────────────────────
+// Hourly job. Computes 24h complaint / bounce rates, raises or resolves
+// DeliverabilityAlert rows, and writes a snapshot to
+// Setting('deliverability.snapshot') for the dashboard tile.
+export const QUEUE_DELIVERABILITY_ROLLUP = 'engagement-deliverability-rollup' as const;
+export type DeliverabilityRollupJobData = Record<string, never>;
+
 // ─── CRM activity push (Phase 2 — defined here for forward-compat) ─────────
 export const QUEUE_CRM_ACTIVITY_PUSH = 'engagement-crm-activity-push' as const;
 export type CrmActivityPushJobData = {
@@ -94,7 +101,15 @@ export type JourneyTickJobData = {
 export type JourneyTriggerJobData =
   | { kind: 'audience-enter'; audienceId: number; subscriberId: string }
   | { kind: 'audience-exit'; audienceId: number; subscriberId: string }
-  | { kind: 'event'; event: string; subscriberId: string; eventMessageId: string };
+  | {
+      kind: 'event';
+      event: string;
+      subscriberId: string;
+      eventMessageId: string;
+      // Properties from the event row, used for WaitFor predicate evaluation
+      // and (later) EventEntry predicate evaluation. Null when absent.
+      properties?: Record<string, unknown> | null;
+    };
 
 // ─── Smoke-test queue (env-gated; mirrors CRM `generate`) ──────────────────
 export const QUEUE_GENERATE = 'engagement-generate' as const;

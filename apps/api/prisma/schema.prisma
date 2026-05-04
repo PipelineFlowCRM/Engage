@@ -142,6 +142,9 @@ model Audience {
   lastComputedAt         DateTime?
   lastComputeMs          Int?
   lastComputeError       String?
+  // Non-fatal warnings from the most recent compute pass — e.g. journey
+  // trigger fan-out capped by the storm guardrail. Cleared on a clean run.
+  lastComputeWarning     String?
   memberCount            Int       @default(0)
   // Bumped on every successful compute pass — used to delete stale members.
   computeVersion         Int       @default(0)
@@ -458,6 +461,25 @@ model Setting {
   key       String   @id
   value     Json
   updatedAt DateTime @updatedAt
+}
+
+// ─── Deliverability ────────────────────────────────────────────────────────
+// Raised by the deliverability-rollup worker (hourly). resolvedAt is set
+// when the next rollup pass shows the underlying metric back under
+// threshold. Latest 24h rates also live in Setting('deliverability.snapshot').
+model DeliverabilityAlert {
+  id          BigInt    @id @default(autoincrement())
+  // 'complaint_rate' | 'bounce_rate' | 'ses_paused' | 'ses_quota_low'
+  kind        String
+  // 'critical' | 'warning'
+  severity    String
+  // Rate / threshold / sample size at trigger time.
+  meta        Json      @default("{}")
+  triggeredAt DateTime  @default(now())
+  resolvedAt  DateTime?
+
+  @@index([kind, triggeredAt])
+  @@index([resolvedAt, triggeredAt])
 }
 
 // ─── Audit ─────────────────────────────────────────────────────────────────

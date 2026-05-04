@@ -19,6 +19,7 @@ import { prisma } from '../db.js';
 import { logger } from '../logger.js';
 import { redisConnection } from '../lib/redis.js';
 import { lookupNode, parseDefinition, recordStep } from '../lib/journey.js';
+import { evaluatePredicates, type Predicate } from '../lib/predicates.js';
 
 const tickQueue = new Queue(QUEUE_JOURNEY_TICK, { connection: redisConnection });
 
@@ -28,8 +29,11 @@ export async function processJourneyTrigger(job: Job<JourneyTriggerJobData>): Pr
   const signalKey = data.kind === 'event' ? data.event : String(data.audienceId);
 
   // 1) Resume any matching JourneyWait rows for this subscriber (signal
-  // arrived). All three trigger kinds can wake a wait.
-  await resumeWaitsForSignal(data.kind, signalKey, subscriberId);
+  // arrived). All three trigger kinds can wake a wait. For 'event' triggers
+  // we pass the event's properties so the wait's predicate can be evaluated;
+  // audience-* signals don't carry properties.
+  const eventProps = data.kind === 'event' ? data.properties ?? null : null;
+  await resumeWaitsForSignal(data.kind, signalKey, subscriberId, eventProps);
 
   // 2) Audience-exit is wait-only — it never starts a new run.
   if (data.kind === 'audience-exit') return;
@@ -120,9 +124,10 @@ export async function resumeWaitsForSignal(
   signalType: 'event' | 'audience-enter' | 'audience-exit',
   signalKey: string,
   subscriberId: bigint,
+  // Event-type signals carry properties; audience signals don't. Used to
+  // evaluate WaitFor.predicate (a list of {key, operator, value} entries).
+  eventProperties: Record<string, unknown> | null,
 ): Promise<void> {
-  // Match by (signalType, signalKey) AND the subscriber on the parent run.
-  // The JourneyWait→JourneyRun→subscriberId join keeps it focused.
   const waits = await prisma.journeyWait.findMany({
     where: {
       signalType,
@@ -142,7 +147,19 @@ export async function resumeWaitsForSignal(
       await prisma.journeyWait.delete({ where: { id: w.id } });
       continue;
     }
-    // Property-predicate evaluation deferred — match on signal key alone for now.
+
+    // Predicate evaluation. Stored on the JourneyWait row at WaitFor entry
+    // time so we evaluate against the same shape the operator wrote.
+    const predicates = (w.predicate as Predicate[] | null) ?? null;
+    if (!evaluatePredicates(predicates, eventProperties)) {
+      logger.debug(
+        { runId: w.runId.toString(), signalType, signalKey },
+        'journey-resume: predicate failed, run stays waiting',
+      );
+      // Don't delete the wait — another future signal might match.
+      continue;
+    }
+
     await prisma.$transaction(async (tx) => {
       await recordStep(tx, w.runId, w.run.currentNodeId, 'WaitFor', 'exited', {
         signalType,

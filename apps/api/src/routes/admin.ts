@@ -97,3 +97,23 @@ adminRouter.get(
     res.json({ settings: rows });
   }),
 );
+
+// Deliverability snapshot + active alerts. The hourly rollup writes the
+// snapshot into Setting('deliverability.snapshot'); alerts live in their
+// own table with resolvedAt set when the metric falls back below threshold.
+adminRouter.get(
+  '/deliverability',
+  asyncHandler(async (_req, res) => {
+    const [snapshotRow, alerts] = await Promise.all([
+      prisma.setting.findUnique({ where: { key: 'deliverability.snapshot' } }),
+      prisma.deliverabilityAlert.findMany({
+        where: { resolvedAt: null },
+        orderBy: { triggeredAt: 'desc' },
+      }),
+    ]);
+    res.json({
+      snapshot: snapshotRow?.value ?? null,
+      alerts,
+    });
+  }),
+);

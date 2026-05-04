@@ -7,6 +7,7 @@ import {
   QUEUE_BROADCAST_LAUNCH,
   QUEUE_BROADCAST_SEND,
   QUEUE_CRM_ACTIVITY_PUSH,
+  QUEUE_DELIVERABILITY_ROLLUP,
   QUEUE_EVENT_INGEST,
   QUEUE_JOURNEY_TICK,
   QUEUE_JOURNEY_TRIGGER,
@@ -27,6 +28,7 @@ import { processCrmActivityPush } from './jobs/crmActivityPush.js';
 import { processJourneyTick } from './jobs/journeyTick.js';
 import { processJourneyTrigger } from './jobs/journeyTrigger.js';
 import { processJourneyWaitSweep } from './jobs/journeyWaitSweep.js';
+import { processDeliverabilityRollup } from './jobs/deliverabilityRollup.js';
 
 const concurrency = env.WORKER_CONCURRENCY;
 
@@ -81,9 +83,13 @@ const workers = [
     connection: redisConnection,
     concurrency: 1,
   }),
+  new Worker(QUEUE_DELIVERABILITY_ROLLUP, processDeliverabilityRollup, {
+    connection: redisConnection,
+    concurrency: 1,
+  }),
 ];
 
-// Register the wait-sweep cron once on boot. BullMQ dedupes repeatables by
+// Register recurring crons once on boot. BullMQ dedupes repeatables by
 // jobId, so multi-instance worker deploys converge on a single schedule.
 const waitSweepQueue = new Queue(QUEUE_JOURNEY_WAIT_SWEEP, { connection: redisConnection });
 void waitSweepQueue
@@ -96,6 +102,23 @@ void waitSweepQueue
     },
   )
   .catch((err) => logger.error({ err }, 'failed to register journey-wait-sweep schedule'));
+
+const deliverabilityRollupQueue = new Queue(QUEUE_DELIVERABILITY_ROLLUP, { connection: redisConnection });
+void deliverabilityRollupQueue
+  .add(
+    QUEUE_DELIVERABILITY_ROLLUP,
+    {},
+    {
+      // Hourly. Plus an immediate run on boot so the dashboard shows fresh
+      // numbers right after start.
+      repeat: { every: 60 * 60 * 1000 },
+      jobId: 'recurring:deliverability-rollup',
+    },
+  )
+  .catch((err) => logger.error({ err }, 'failed to register deliverability-rollup schedule'));
+void deliverabilityRollupQueue
+  .add(QUEUE_DELIVERABILITY_ROLLUP, {}, { jobId: 'boot:deliverability-rollup' })
+  .catch(() => undefined);
 
 for (const w of workers) {
   w.on('failed', (job: Job | undefined, err: Error) => {
@@ -148,6 +171,7 @@ async function shutdown(signal: string) {
   await sendEvents.close().catch(() => undefined);
   await sendQueue.close().catch(() => undefined);
   await waitSweepQueue.close().catch(() => undefined);
+  await deliverabilityRollupQueue.close().catch(() => undefined);
   await redisConnection.quit().catch(() => undefined);
   await prisma.$disconnect().catch(() => undefined);
   process.exit(0);
