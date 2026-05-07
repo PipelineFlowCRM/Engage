@@ -1,9 +1,11 @@
-import { Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes } from 'react-router-dom';
 import { RequireAuth } from '@/components/layout/RequireAuth';
 import { AppShell } from '@/components/layout/AppShell';
+import { SettingsLayout } from '@/components/layout/SettingsLayout';
 import { Login } from '@/pages/auth/Login';
 import { Register } from '@/pages/auth/Register';
 import { Dashboard } from '@/pages/Dashboard';
+import { Events } from '@/pages/Events';
 import { Subscribers } from '@/pages/Subscribers';
 import { SubscriberDetail } from '@/pages/SubscriberDetail';
 import { Audiences } from '@/pages/Audiences';
@@ -32,6 +34,7 @@ export function App() {
       <Route path="/p/preferences/:token" element={<PreferencesCenter />} />
       <Route element={<RequireAuth><AppShell /></RequireAuth>}>
         <Route index element={<Dashboard />} />
+        <Route path="/events" element={<Events />} />
         <Route path="/subscribers" element={<Subscribers />} />
         <Route path="/subscribers/:externalId" element={<SubscriberDetail />} />
         <Route path="/audiences" element={<Audiences />} />
@@ -49,11 +52,14 @@ export function App() {
         <Route path="/journeys/:id" element={<JourneyDetail />} />
         <Route path="/journeys/:id/edit" element={<JourneyEditor />} />
         <Route path="/deliveries" element={<Deliveries />} />
-        <Route path="/settings/profile" element={<Profile />} />
-        <Route path="/settings/subscription-groups" element={<SubscriptionGroups />} />
-        <Route path="/settings/suppressions" element={<Suppressions />} />
-        <Route path="/settings/api-tokens" element={<ApiTokens />} />
-        <Route path="/settings/secrets" element={<Secrets />} />
+        <Route path="/settings" element={<SettingsLayout />}>
+          <Route index element={<Navigate to="profile" replace />} />
+          <Route path="profile" element={<Profile />} />
+          <Route path="subscription-groups" element={<SubscriptionGroups />} />
+          <Route path="suppressions" element={<Suppressions />} />
+          <Route path="api-tokens" element={<ApiTokens />} />
+          <Route path="secrets" element={<Secrets />} />
+        </Route>
       </Route>
     </Routes>
   );

@@ -338,10 +338,31 @@ Run from the workspace root (host). Inside the `api` container only the api pack
 | `pnpm test` | Run Vitest unit tests |
 | `bash scripts/smoke.sh` | End-to-end happy-path smoke test against a running stack |
 
+
+## Testing with the demo
+
+1. Mint a token in Settings → API tokens scoped only to engagement:ingest. The token value lands in browser source — treat it as semi-public.
+2. Drop the snippet from the top of pfe/v1.js into your site's <head>, replacing data-write-key and data-api-host.
+3. The first pageview fires automatically. Call pfe.identify('u_42', { email: '…' }) after login and pfe.track('signed_up', { plan: 'pro' }) for events. pfe.reset() on logout.
+
+Demo page at apps/web/public/pfe/demo.html, served at https://<your-engagement-host>/pfe/demo.html once the web container restarts (Vite copies public/ into the nginx static root at build time, so a docker compose build web && docker compose up -d web is what picks it up). This is temporary and wont be part of the final release packages.
+
+What it does
+
+- Loader card — paste write key + API host (defaults to the page's own origin), toggle auto-pageviews and debug, click Load widget. Only inserts the <script src="v1.js"> after the click, so you can paste your token without it leaking before you mean it to.
+- Identity status — shows anonymousId and userId from the widget's localStorage-backed state, with a refresh button.
+- identify — userId + email + plan + timezone form.
+- track — three preset buttons (clicked_cta, added_to_cart, started_checkout) with realistic property shapes, plus a custom event input with a JSON properties textarea.
+- page — manual pfe.page(name), plus three SPA-nav buttons that history.pushState('?view=…') to demonstrate the auto-page hook firing on pushState.
+- group / alias / reset — full surface, with reset clearly marked danger.
+- Activity log — every demo action and any errors are appended at the bottom; for the actual outbound HTTP, watch DevTools → Network filtered on /api/public/.
+
+Once you have a token: open the page, paste pfe_tok_… + your engagement host, click load, then poke buttons — the initial pageview fires automatically, and every other action goes out as a separate POST /api/public/<type> request you can inspect in the browser.
+
 ## Contributing
 
 Issues and PRs welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for build conventions, test expectations, and PR guidelines.
 
 ## License
 
-MIT.
+[Mozilla Public License 2.0](./LICENSE).

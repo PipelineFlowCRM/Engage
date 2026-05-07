@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { formatMjml } from '@/lib/mjmlFormat';
 
 const STARTER_MJML = `<mjml>
   <mj-body background-color="#f8fafc">
@@ -67,7 +68,9 @@ export function TemplateEditor() {
       setFromName(t.definition.fromName);
       setFromEmail(t.definition.fromEmail);
       setReplyTo(t.definition.replyTo ?? '');
-      setMjml(t.definition.mjml);
+      // Pretty-print on load so single-line / collapsed MJML displays
+      // legibly. The user's edits are preserved verbatim from there.
+      setMjml(formatMjml(t.definition.mjml));
       setText(t.definition.text ?? '');
       setHydrated(true);
     }
@@ -145,16 +148,41 @@ export function TemplateEditor() {
         </Card>
 
         <Card>
-          <CardHeader><CardTitle>MJML body</CardTitle></CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
+            <CardTitle>MJML body</CardTitle>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setMjml((m) => formatMjml(m))}
+              title="Re-indent the MJML"
+            >
+              Format
+            </Button>
+          </CardHeader>
           <CardContent>
-            <Textarea rows={26} className="font-mono text-[11px] leading-relaxed" value={mjml} onChange={(e) => setMjml(e.target.value)} />
+            <Textarea
+              rows={26}
+              spellCheck={false}
+              wrap="off"
+              className="whitespace-pre font-mono text-[11px] leading-relaxed"
+              value={mjml}
+              onChange={(e) => setMjml(e.target.value)}
+            />
           </CardContent>
         </Card>
 
         <Card className="lg:col-span-2">
           <CardHeader><CardTitle>Plaintext fallback (optional)</CardTitle></CardHeader>
           <CardContent>
-            <Textarea rows={8} className="font-mono text-xs" value={text} onChange={(e) => setText(e.target.value)} placeholder="Leave blank to derive from HTML" />
+            <Textarea
+              rows={8}
+              spellCheck={false}
+              className="whitespace-pre-wrap font-mono text-xs"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Leave blank to derive from HTML"
+            />
           </CardContent>
         </Card>
 

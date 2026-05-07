@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pipelineflow Engagement — JS widget demo</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #14181d;
+    --panel-2: #1b2026;
+    --border: #2a3038;
+    --text: #e6e9ee;
+    --muted: #98a2b3;
+    --accent: #7c5cff;
+    --accent-2: #5eead4;
+    --danger: #f87171;
+    --good: #4ade80;
+    --warn: #fbbf24;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent-2); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 80px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h1 small { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
+  h2 { font-size: 14px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+  p.lede { color: var(--muted); margin: 0 0 24px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  input[type="text"], textarea {
+    width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text); font: inherit;
+  }
+  textarea { font-family: var(--mono); font-size: 12px; min-height: 70px; resize: vertical; }
+  input[type="checkbox"] { vertical-align: middle; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
+  .row > div { flex: 1; min-width: 140px; }
+  button {
+    appearance: none; border: 1px solid var(--border); background: var(--panel-2);
+    color: var(--text); padding: 8px 12px; border-radius: 6px; cursor: pointer;
+    font: inherit; transition: border-color 120ms, background 120ms;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+  button.primary:hover { filter: brightness(1.1); }
+  button.danger { border-color: #4a2027; color: #fda4af; }
+  button.danger:hover { background: #2a1518; border-color: var(--danger); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  code, kbd { font-family: var(--mono); font-size: 12.5px; background: var(--panel-2); padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border); }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); color: var(--muted); }
+  .pill.on { color: var(--good); border-color: #1f3d2c; background: #0e1a14; }
+  .pill.off { color: var(--muted); }
+  .status { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+  .status .kv { font-size: 12px; color: var(--muted); }
+  .status .kv b { color: var(--text); font-family: var(--mono); font-weight: 500; }
+  #log {
+    font-family: var(--mono); font-size: 12px; background: #07090b; border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px; height: 220px; overflow: auto; white-space: pre-wrap;
+  }
+  #log .l { color: var(--muted); }
+  #log .l b { color: var(--text); }
+  #log .l.err b { color: var(--danger); }
+  #log .l.ok b { color: var(--good); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+  .footnote { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Pipelineflow Engagement <small>JS widget demo</small></h1>
+  <p class="lede">
+    Paste a write-key + your engagement host, click <b>Load widget</b>, then exercise the API. Open
+    DevTools (Network → <code>fetch/xhr</code>, filter <code>/api/public/</code>) to see the requests
+    on the wire. The browser console will show debug logs from the widget when <code>debug</code> is on.
+  </p>
+
+  <!-- ── 1. Loader ─────────────────────────────────────────────────── -->
+  <section class="card" id="loader">
+    <h2>1. Configure &amp; load</h2>
+    <div class="row">
+      <div>
+        <label for="writeKey">Write key (<code>pfe_tok_…</code>)</label>
+        <input id="writeKey" type="text" placeholder="pfe_tok_xxxxxxxx.yyyyyyyyyyyy" autocomplete="off" />
+      </div>
+      <div>
+        <label for="apiHost">API host</label>
+        <input id="apiHost" type="text" placeholder="https://engagement.example.com" />
+      </div>
+    </div>
+    <div class="row" style="margin-top: 8px;">
+      <div style="flex:0 0 auto;">
+        <label><input type="checkbox" id="autoPage" checked /> Auto pageviews</label>
+      </div>
+      <div style="flex:0 0 auto;">
+        <label><input type="checkbox" id="debug" checked /> Debug logging (console)</label>
+      </div>
+      <div style="flex:1 1 auto; text-align: right;">
+        <button class="primary" id="loadBtn" type="button">Load widget</button>
+      </div>
+    </div>
+    <p class="footnote" id="loaderHelp">
+      Status: <span class="pill off" id="loadedPill">not loaded</span>
+    </p>
+  </section>
+
+  <!-- ── 2. Identity status ────────────────────────────────────────── -->
+  <section class="card">
+    <h2>2. Identity</h2>
+    <div class="status">
+      <span class="kv">anonymousId: <b id="anonId">—</b></span>
+      <span class="kv">userId: <b id="userId">—</b></span>
+      <button type="button" id="refreshIds">Refresh</button>
+    </div>
+  </section>
+
+  <div class="grid">
+    <!-- ── identify ─────────────────────────────────────────────── -->
+    <section class="card">
+      <h2>identify</h2>
+      <div class="row">
+        <div>
+          <label for="idUserId">userId</label>
+          <input id="idUserId" type="text" value="u_demo_42" />
+        </div>
+        <div>
+          <label for="idEmail">email</label>
+          <input id="idEmail" type="text" value="demo@acme.test" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 8px;">
+        <div>
+          <label for="idPlan">plan</label>
+          <input id="idPlan" type="text" value="pro" />
+        </div>
+        <div>
+          <label for="idTimezone">timezone</label>
+          <input id="idTimezone" type="text" value="America/Los_Angeles" />
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="primary" type="button" data-action="identify">Identify</button>
+      </div>
+    </section>
+
+    <!-- ── track ────────────────────────────────────────────────── -->
+    <section class="card">
+      <h2>track</h2>
+      <div class="btn-row">
+        <button type="button" data-action="track-cta">clicked_cta</button>
+        <button type="button" data-action="track-add-to-cart">added_to_cart</button>
+        <button type="button" data-action="track-checkout">started_checkout</button>
+      </div>
+      <hr />
+      <div class="row">
+        <div>
+          <label for="customEvent">Custom event name</label>
+          <input id="customEvent" type="text" value="completed_onboarding" />
+        </div>
+      </div>
+      <div style="margin-top: 8px;">
+        <label for="customProps">Properties (JSON, optional)</label>
+        <textarea id="customProps">{ "stepCount": 7 }</textarea>
+      </div>
+      <div class="btn-row">
+        <button class="primary" type="button" data-action="track-custom">Track custom event</button>
+      </div>
+    </section>
+
+    <!-- ── page ─────────────────────────────────────────────────── -->
+    <section class="card">
+      <h2>page</h2>
+      <div class="row">
+        <div>
+          <label for="pageName">name (optional)</label>
+          <input id="pageName" type="text" value="Pricing" />
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="primary" type="button" data-action="page-manual">Fire page() manually</button>
+      </div>
+      <hr />
+      <p class="footnote" style="margin: 0 0 6px;">SPA-style navigation (<code>history.pushState</code> — auto-page should fire each time):</p>
+      <div class="btn-row">
+        <button type="button" data-action="nav" data-view="home">→ ?view=home</button>
+        <button type="button" data-action="nav" data-view="pricing">→ ?view=pricing</button>
+        <button type="button" data-action="nav" data-view="signup">→ ?view=signup</button>
+      </div>
+    </section>
+
+    <!-- ── group ────────────────────────────────────────────────── -->
+    <section class="card">
+      <h2>group</h2>
+      <div class="row">
+        <div>
+          <label for="groupId">groupId</label>
+          <input id="groupId" type="text" value="acct_acme" />
+        </div>
+        <div>
+          <label for="groupName">name</label>
+          <input id="groupName" type="text" value="Acme Inc" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 8px;">
+        <div>
+          <label for="groupSeats">seats</label>
+          <input id="groupSeats" type="text" value="42" />
+        </div>
+        <div>
+          <label for="groupTier">tier</label>
+          <input id="groupTier" type="text" value="enterprise" />
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="primary" type="button" data-action="group">Group</button>
+      </div>
+    </section>
+
+    <!-- ── alias / reset ────────────────────────────────────────── -->
+    <section class="card">
+      <h2>alias &amp; reset</h2>
+      <div class="row">
+        <div>
+          <label for="aliasNew">new userId (alias to)</label>
+          <input id="aliasNew" type="text" value="u_demo_canonical" />
+        </div>
+      </div>
+      <div class="btn-row">
+        <button type="button" data-action="alias">Alias current → new</button>
+      </div>
+      <hr />
+      <p class="footnote" style="margin: 0 0 6px;">Reset clears the identity and rotates the anonymous ID (logout-style).</p>
+      <div class="btn-row">
+        <button class="danger" type="button" data-action="reset">Reset</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- ── log ───────────────────────────────────────────────────────── -->
+  <section class="card">
+    <h2>Activity log <span class="footnote">(local — what this page asked the widget to do)</span></h2>
+    <div id="log"></div>
+  </section>
+</div>
+
+<script>
+  // ── Snippet stub (the same one documented in pfe/v1.js) ───────────────
+  // We don't run it on initial page load — only after the user clicks
+  // "Load widget" so they can paste their writeKey first.
+  function installSnippetStub() {
+    if (window.pfe && !Array.isArray(window.pfe)) return; // already real
+    var pfe = window.pfe = window.pfe || [];
+    var fn = function (f) {
+      return function () {
+        pfe.push([f].concat(Array.prototype.slice.call(arguments, 0)));
+      };
+    };
+    var methods = ['init', 'identify', 'track', 'page', 'group', 'alias', 'reset', 'setAnonymousId'];
+    for (var i = 0; i < methods.length; i++) pfe[methods[i]] = fn(methods[i]);
+  }
+
+  function loadWidget(writeKey, apiHost, autoPage, debug) {
+    installSnippetStub();
+    if (document.getElementById('pfe-tracker')) return;
+    var s = document.createElement('script');
+    s.async = true;
+    s.id = 'pfe-tracker';
+    s.setAttribute('data-write-key', writeKey);
+    s.setAttribute('data-api-host', apiHost);
+    s.setAttribute('data-auto-page', autoPage ? 'true' : 'false');
+    s.setAttribute('data-debug', debug ? 'true' : 'false');
+    // We resolve v1.js relative to the same host that's serving this demo.
+    s.src = new URL('v1.js', document.baseURI).toString();
+    s.onload = function () {
+      logLine('ok', 'widget loaded from ' + s.src);
+      var pill = $('loadedPill');
+      pill.className = 'pill on';
+      pill.textContent = 'loaded';
+      refreshIds();
+    };
+    s.onerror = function () {
+      logLine('err', 'failed to load ' + s.src);
+      var pill = $('loadedPill');
+      pill.className = 'pill';
+      pill.textContent = 'load failed';
+      pill.style.color = 'var(--danger)';
+      $('loadBtn').disabled = false;
+    };
+    var first = document.getElementsByTagName('script')[0];
+    first.parentNode.insertBefore(s, first);
+  }
+
+  // ── DOM helpers ───────────────────────────────────────────────────────
+  var $ = function (id) { return document.getElementById(id); };
+
+  function logLine(kind, msg, payload) {
+    var el = $('log');
+    var line = document.createElement('div');
+    line.className = 'l' + (kind ? ' ' + kind : '');
+    var time = new Date().toLocaleTimeString();
+    var head = '[' + time + '] ';
+    line.innerHTML = head + '<b>' + escapeHtml(msg) + '</b>';
+    if (payload !== undefined) line.innerHTML += '\n  ' + escapeHtml(JSON.stringify(payload));
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c];
+    });
+  }
+
+  function refreshIds() {
+    var a = (window.pfe && typeof window.pfe.getAnonymousId === 'function')
+      ? window.pfe.getAnonymousId() : null;
+    var u = (window.pfe && typeof window.pfe.getUserId === 'function')
+      ? window.pfe.getUserId() : null;
+    $('anonId').textContent = a || '—';
+    $('userId').textContent = u || '—';
+  }
+
+  function ensureLoaded() {
+    if (window.pfe && !Array.isArray(window.pfe)) return true;
+    logLine('err', 'widget not loaded — click "Load widget" first');
+    return false;
+  }
+
+  function safeJSON(s, fallback) {
+    if (!s || !s.trim()) return fallback;
+    try { return JSON.parse(s); } catch (e) {
+      logLine('err', 'invalid JSON in properties: ' + e.message);
+      return fallback;
+    }
+  }
+
+  // ── Default the host to the page's own origin when sensible ───────────
+  (function () {
+    var origin = location.origin;
+    if (origin && /^https?:/.test(origin)) $('apiHost').value = origin;
+  })();
+
+  // ── Loader button ─────────────────────────────────────────────────────
+  $('loadBtn').addEventListener('click', function () {
+    var key = $('writeKey').value.trim();
+    var host = $('apiHost').value.trim().replace(/\/+$/, '');
+    if (!key) { logLine('err', 'write key required'); return; }
+    if (!host) { logLine('err', 'api host required'); return; }
+    var autoPage = $('autoPage').checked;
+    var debug = $('debug').checked;
+    loadWidget(key, host, autoPage, debug);
+    $('loadBtn').disabled = true;
+    var pill = $('loadedPill');
+    pill.className = 'pill';
+    pill.textContent = 'loading…';
+    pill.style.color = '';
+    logLine('ok', 'loading widget…', { apiHost: host, autoPage: autoPage, debug: debug });
+  });
+
+  $('refreshIds').addEventListener('click', refreshIds);
+
+  // ── Action handlers ───────────────────────────────────────────────────
+  document.addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (!(t instanceof HTMLElement)) return;
+    var action = t.getAttribute('data-action');
+    if (!action) return;
+    if (!ensureLoaded()) return;
+
+    if (action === 'identify') {
+      var traits = {
+        email: $('idEmail').value.trim() || undefined,
+        plan: $('idPlan').value.trim() || undefined,
+        timezone: $('idTimezone').value.trim() || undefined,
+      };
+      var uid = $('idUserId').value.trim() || undefined;
+      window.pfe.identify(uid, traits);
+      logLine(null, 'identify(' + (uid || '∅') + ', …)', traits);
+      refreshIds();
+      return;
+    }
+
+    if (action === 'track-cta') {
+      var p = { cta: 'hero_signup', placement: 'top_nav' };
+      window.pfe.track('clicked_cta', p);
+      logLine(null, "track('clicked_cta', …)", p);
+      return;
+    }
+    if (action === 'track-add-to-cart') {
+      var p2 = { sku: 'WIDGET-001', quantity: 2, currency: 'USD', value: 49.98 };
+      window.pfe.track('added_to_cart', p2);
+      logLine(null, "track('added_to_cart', …)", p2);
+      return;
+    }
+    if (action === 'track-checkout') {
+      var p3 = { orderId: 'ord_' + Math.random().toString(36).slice(2, 8), total: 99.0, currency: 'USD' };
+      window.pfe.track('started_checkout', p3);
+      logLine(null, "track('started_checkout', …)", p3);
+      return;
+    }
+    if (action === 'track-custom') {
+      var name = $('customEvent').value.trim();
+      if (!name) { logLine('err', 'custom event name required'); return; }
+      var props = safeJSON($('customProps').value, undefined);
+      if (props === undefined && $('customProps').value.trim()) return; // bad JSON
+      window.pfe.track(name, props);
+      logLine(null, "track('" + name + "', …)", props || {});
+      return;
+    }
+
+    if (action === 'page-manual') {
+      var pageName = $('pageName').value.trim() || undefined;
+      window.pfe.page(pageName);
+      logLine(null, "page('" + (pageName || '') + "')");
+      return;
+    }
+
+    if (action === 'nav') {
+      var view = t.getAttribute('data-view') || 'home';
+      // pushState a query change. The widget hooks pushState and emits a
+      // `page` event because pathname+search+hash differs.
+      history.pushState({}, '', '?view=' + encodeURIComponent(view));
+      logLine(null, 'pushState ?view=' + view + ' (widget should auto-fire page)');
+      return;
+    }
+
+    if (action === 'group') {
+      var gid = $('groupId').value.trim();
+      if (!gid) { logLine('err', 'groupId required'); return; }
+      var traitsG = {
+        name: $('groupName').value.trim() || undefined,
+        seats: Number($('groupSeats').value) || undefined,
+        tier: $('groupTier').value.trim() || undefined,
+      };
+      window.pfe.group(gid, traitsG);
+      logLine(null, "group('" + gid + "', …)", traitsG);
+      return;
+    }
+
+    if (action === 'alias') {
+      var newId = $('aliasNew').value.trim();
+      if (!newId) { logLine('err', 'new userId required'); return; }
+      window.pfe.alias(newId);
+      logLine(null, "alias('" + newId + "', previous=" + (window.pfe.getUserId() || window.pfe.getAnonymousId()) + ')');
+      refreshIds();
+      return;
+    }
+
+    if (action === 'reset') {
+      window.pfe.reset();
+      logLine('ok', 'reset() — identity cleared, anonymousId rotated');
+      refreshIds();
+      return;
+    }
+  });
+
+  // Surface any uncaught errors in the on-page log so a misconfigured key
+  // doesn't silently fail.
+  window.addEventListener('error', function (e) {
+    logLine('err', 'window error: ' + (e.message || 'unknown'));
+  });
+
+  logLine(null, 'demo ready — paste a write key and click "Load widget"');
+</script>
+</body>
+</html>

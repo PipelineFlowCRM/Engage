@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useAuth } from '@/hooks/useAuth';
+import { Wordmark } from '@/components/layout/Wordmark';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -33,13 +34,11 @@ export function Login() {
   };
 
   return (
-    <div className="grid min-h-screen place-items-center bg-gradient-mesh p-4">
-      <Card className="w-full max-w-sm">
+    <div className="relative grid min-h-screen place-items-center p-4">
+      <div className="pointer-events-none absolute inset-0 mesh" />
+      <Card className="relative w-full max-w-sm shadow-elevated">
         <CardHeader>
-          <div className="mb-3 flex items-center gap-3">
-            <div className="brand-chip h-8 w-8 rounded-md" />
-            <div className="text-base font-semibold tracking-tight">Engagement</div>
-          </div>
+          <Wordmark className="mb-4" />
           <CardTitle>Sign in</CardTitle>
           <CardDescription>Welcome back. Sign in to manage broadcasts and journeys.</CardDescription>
         </CardHeader>
@@ -53,7 +52,11 @@ export function Login() {
               <Label htmlFor="password">Password</Label>
               <Input id="password" type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
             </div>
-            <Button type="submit" variant="brand" className="w-full" disabled={submitting}>
+            <Button
+              type="submit"
+              className="w-full bg-gradient-brand text-white shadow-glow hover:opacity-90"
+              disabled={submitting}
+            >
               {submitting ? 'Signing in…' : 'Sign in'}
             </Button>
             <p className="text-center text-xs text-muted-foreground">

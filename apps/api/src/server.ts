@@ -23,6 +23,7 @@ import { suppressionsRouter } from './routes/suppressions.js';
 import { secretsRouter } from './routes/secrets.js';
 import { apiTokensRouter } from './routes/apiTokens.js';
 import { deliveriesRouter } from './routes/deliveries.js';
+import { eventsRouter } from './routes/events.js';
 import { dashboardRouter } from './routes/dashboard.js';
 import { adminRouter } from './routes/admin.js';
 import { trackRouter } from './routes/public/track.js';
@@ -56,7 +57,21 @@ export function buildApp() {
     }),
   );
 
-  app.use(cors({ origin: env.APP_ORIGIN, credentials: true }));
+  // CORS is split by mount point.
+  //  - /api/public/* is token-auth, cookie-free, and meant to be called from
+  //    the embedded JS widget on operator-owned customer-facing sites. Those
+  //    are arbitrary origins, so we reflect the request origin and disallow
+  //    credentials (the Bearer token does the auth).
+  //  - Everything else is the operator's own SPA + cookie-auth, locked to
+  //    APP_ORIGIN.
+  const publicCors = cors({ origin: true, credentials: false, maxAge: 86400 });
+  const appCors = cors({ origin: env.APP_ORIGIN, credentials: true });
+  app.use((req, res, next) => {
+    if (req.path === '/api/public' || req.path.startsWith('/api/public/')) {
+      return publicCors(req, res, next);
+    }
+    return appCors(req, res, next);
+  });
 
   // Webhooks need the raw body for signature verification — mount per-route
   // before the global JSON parser so we can re-verify against the exact bytes
@@ -92,6 +107,7 @@ export function buildApp() {
   app.use('/api/secrets', secretsRouter);
   app.use('/api/api-tokens', apiTokensRouter);
   app.use('/api/deliveries', deliveriesRouter);
+  app.use('/api/events', eventsRouter);
   app.use('/api/dashboard', dashboardRouter);
   app.use('/api/admin', adminRouter);
 

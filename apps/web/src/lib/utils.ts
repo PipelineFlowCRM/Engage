@@ -20,3 +20,13 @@ export function formatNumber(n: number | bigint | null | undefined): string {
   if (n == null) return '—';
   return new Intl.NumberFormat().format(typeof n === 'bigint' ? Number(n) : n);
 }
+
+export function initials(name: string | null | undefined): string {
+  if (!name) return '?';
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  const first = parts[0];
+  if (!first) return '?';
+  if (parts.length === 1) return first.slice(0, 2).toUpperCase();
+  const last = parts[parts.length - 1] ?? first;
+  return ((first[0] ?? '') + (last[0] ?? '')).toUpperCase();
+}

@@ -4,96 +4,180 @@
 
 @layer base {
   :root {
+    /* Light theme — paper-like, calm. Slate-based neutrals (BRAND.md). */
     --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
+    --foreground: 222 47% 11%;        /* slate-900 #0F172A */
+
     --card: 0 0% 100%;
     --card-foreground: 222 47% 11%;
     --popover: 0 0% 100%;
     --popover-foreground: 222 47% 11%;
+
     --primary: 222 47% 11%;
     --primary-foreground: 210 40% 98%;
     --secondary: 210 40% 96%;
     --secondary-foreground: 217 33% 17%;
     --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
-    --accent: 214 32% 91%;
+    --muted-foreground: 215 16% 47%;  /* slate-500 #64748B */
+    --accent: 214 32% 91%;             /* slate-200 #E2E8F0 */
     --accent-foreground: 217 33% 17%;
-    --destructive: 0 84% 60%;
+
+    --destructive: 0 84% 60%;          /* #EF4444 */
     --destructive-foreground: 0 0% 98%;
-    --success: 173 80% 40%;
+    --success: 158 64% 40%;            /* emerald #10B981 */
     --success-foreground: 0 0% 100%;
-    --warning: 38 92% 50%;
+    --warning: 38 92% 50%;             /* amber #F59E0B */
     --warning-foreground: 0 0% 100%;
-    --border: 214 32% 91%;
+    --info: 217 91% 60%;               /* blue #3B82F6 */
+    --info-foreground: 0 0% 100%;
+
+    --border: 214 32% 91%;             /* slate-200 */
     --input: 214 32% 91%;
-    --ring: 221 83% 53%;
-    --brand: 221 83% 53%;
+    --ring: 239 84% 60%;               /* indigo-600 #4F46E5 */
+
+    --brand: 239 84% 60%;              /* indigo-600 #4F46E5 */
     --brand-foreground: 0 0% 100%;
+
     --radius: 0.625rem;
-    --gradient-brand: linear-gradient(135deg, hsl(221 83% 53%) 0%, hsl(192 91% 36%) 55%, hsl(173 80% 40%) 100%);
+
+    /* Engagement signature gradient: indigo → fuchsia → pink. */
+    --gradient-brand: linear-gradient(135deg, hsl(239 84% 60%) 0%, hsl(272 84% 56%) 55%, hsl(330 81% 60%) 100%);
+    /* Soft pastel surface tint — safe to put behind text. */
+    --gradient-brand-bg: linear-gradient(135deg, hsl(232 100% 97%) 0%, hsl(330 100% 97%) 100%);
+    /* Mesh — three radial gradients in indigo/purple/pink for ambient depth. */
     --gradient-mesh:
-      radial-gradient(at 0% 0%, hsl(221 83% 53% / 0.16) 0px, transparent 50%),
-      radial-gradient(at 100% 0%, hsl(173 80% 40% / 0.12) 0px, transparent 50%),
-      radial-gradient(at 50% 100%, hsl(192 91% 36% / 0.10) 0px, transparent 50%);
+      radial-gradient(at 0% 0%, hsl(239 84% 60% / 0.16) 0px, transparent 50%),
+      radial-gradient(at 100% 0%, hsl(330 81% 60% / 0.12) 0px, transparent 50%),
+      radial-gradient(at 50% 100%, hsl(272 84% 56% / 0.10) 0px, transparent 50%);
+
+    /* Cross-product reference (for the "Flow" wordmark) — CRM blue → teal. */
+    --gradient-crm: linear-gradient(90deg, hsl(221 83% 53%) 0%, hsl(173 80% 40%) 100%);
   }
+
   .dark {
-    --background: 222 47% 5%;
-    --foreground: 210 40% 98%;
-    --card: 222 40% 8%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222 42% 9%;
-    --popover-foreground: 210 40% 98%;
+    /* Dark theme — deep, layered. Cooled toward indigo/violet to match brand. */
+    --background: 240 27% 6%;
+    --foreground: 220 25% 96%;
+
+    --card: 240 24% 9%;
+    --card-foreground: 220 25% 96%;
+    --popover: 240 26% 10%;
+    --popover-foreground: 220 25% 96%;
+
     --primary: 0 0% 98%;
-    --primary-foreground: 222 47% 11%;
-    --secondary: 217 33% 14%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217 33% 13%;
-    --muted-foreground: 215 20% 65%;
-    --accent: 217 33% 17%;
-    --accent-foreground: 210 40% 98%;
+    --primary-foreground: 240 27% 6%;
+    --secondary: 240 18% 14%;
+    --secondary-foreground: 220 25% 96%;
+    --muted: 240 18% 13%;
+    --muted-foreground: 220 14% 64%;
+    --accent: 240 20% 17%;
+    --accent-foreground: 220 25% 96%;
+
     --destructive: 0 84% 62%;
     --destructive-foreground: 0 0% 98%;
-    --success: 173 80% 50%;
-    --success-foreground: 222 47% 11%;
+    --success: 158 64% 50%;
+    --success-foreground: 240 27% 6%;
     --warning: 38 92% 58%;
-    --warning-foreground: 222 47% 11%;
-    --border: 217 33% 18%;
-    --input: 217 33% 18%;
-    --ring: 199 89% 60%;
-    --brand: 199 89% 60%;
-    --brand-foreground: 222 47% 11%;
-    --gradient-brand: linear-gradient(135deg, hsl(217 91% 60%) 0%, hsl(192 91% 46%) 55%, hsl(173 80% 50%) 100%);
+    --warning-foreground: 240 27% 6%;
+    --info: 217 91% 65%;
+    --info-foreground: 240 27% 6%;
+
+    --border: 240 20% 18%;
+    --input: 240 20% 18%;
+    --ring: 244 86% 70%;
+    --brand: 244 86% 70%;              /* lifted indigo for dark surfaces */
+    --brand-foreground: 240 27% 6%;
+
+    --gradient-brand: linear-gradient(135deg, hsl(244 86% 70%) 0%, hsl(280 80% 66%) 55%, hsl(330 86% 70%) 100%);
+    --gradient-brand-bg: linear-gradient(135deg, hsl(240 27% 8%) 0%, hsl(320 30% 11%) 100%);
     --gradient-mesh:
-      radial-gradient(at 0% 0%, hsl(217 91% 60% / 0.18) 0px, transparent 50%),
-      radial-gradient(at 100% 0%, hsl(173 80% 50% / 0.12) 0px, transparent 50%),
-      radial-gradient(at 50% 100%, hsl(192 91% 46% / 0.10) 0px, transparent 50%);
+      radial-gradient(at 0% 0%, hsl(244 86% 70% / 0.18) 0px, transparent 50%),
+      radial-gradient(at 100% 0%, hsl(330 86% 70% / 0.14) 0px, transparent 50%),
+      radial-gradient(at 50% 100%, hsl(280 80% 66% / 0.12) 0px, transparent 50%);
+
+    --gradient-crm: linear-gradient(90deg, hsl(217 91% 60%) 0%, hsl(173 80% 50%) 100%);
   }
-  * { @apply border-border; }
+
+  * {
+    @apply border-border;
+  }
   body {
     @apply bg-background text-foreground;
-    font-feature-settings: 'cv11' 1, 'ss01' 1;
+    font-feature-settings: 'cv11' 1, 'ss01' 1, 'rlig' 1, 'calt' 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
-  h1, h2, h3, h4 { @apply font-sans tracking-tight; letter-spacing: -0.018em; }
+
+  h1, h2, h3, h4 {
+    @apply font-sans tracking-tight;
+    letter-spacing: -0.018em;
+  }
+  h1 { letter-spacing: -0.025em; }
+
+  .tabular { font-variant-numeric: tabular-nums; }
 }
 
 @layer components {
-  .surface { @apply bg-card border border-border/80 shadow-soft rounded-lg; }
+  /* Layered card surface — subtle inner highlight on top edge. */
+  .surface {
+    @apply bg-card border border-border/80 shadow-soft rounded-lg;
+  }
+  .surface-elevated {
+    @apply bg-card border border-border/80 shadow-elevated rounded-lg;
+  }
+
+  /* Soft gradient mesh background (auth pages, dashboard hero). */
+  .mesh {
+    background-image: var(--gradient-mesh);
+  }
+
+  /* Brand gradient text — Engagement indigo→pink. */
   .text-gradient {
     background: var(--gradient-brand);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
   }
+
+  /* CRM gradient text — used by the "Flow" half of the family wordmark. */
+  .text-gradient-crm {
+    background: var(--gradient-crm);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Tinted ring outline for emphasized cards. */
+  .ring-brand {
+    box-shadow:
+      inset 0 1px 0 0 hsl(0 0% 100% / 0.06),
+      0 0 0 1px hsl(var(--brand) / 0.35);
+  }
+
+  /* Logo dot — small glowing chip used in sidebar + auth. */
   .brand-chip {
     background: var(--gradient-brand);
-    box-shadow: inset 0 1px 0 0 hsl(0 0% 100% / 0.25), 0 4px 14px -2px hsl(var(--brand) / 0.55);
+    box-shadow:
+      inset 0 1px 0 0 hsl(0 0% 100% / 0.25),
+      0 4px 14px -2px hsl(var(--brand) / 0.55);
   }
 }
 
+/* Subtle scrollbars */
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: hsl(var(--border)); border-radius: 8px;
-  border: 2px solid transparent; background-clip: padding-box;
+  background: hsl(var(--border));
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
-::-webkit-scrollbar-thumb:hover { background-color: hsl(var(--ring)); }
+::-webkit-scrollbar-thumb:hover { background-color: hsl(var(--ring)); background-clip: padding-box; }
+
+/* Honor reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
