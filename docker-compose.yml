@@ -49,10 +49,14 @@ services:
     image: redis:7-alpine
     container_name: pfengagement-redis
     restart: unless-stopped
+    # AOF on so a redis restart doesn't drop in-flight BullMQ jobs (delayed
+    # ticks, pending broadcast batches, etc.). Without it, any job that was
+    # enqueued but not yet picked up gets lost — leaving e.g. JourneyRun
+    # rows orphaned at status='running' until the hourly stuck-run sweep.
     command:
       - sh
       - -c
-      - 'exec redis-server --maxmemory ${REDIS_MAXMEMORY:-256mb} --maxmemory-policy noeviction $${REDIS_PASSWORD:+--requirepass "$$REDIS_PASSWORD"}'
+      - 'exec redis-server --appendonly yes --maxmemory ${REDIS_MAXMEMORY:-256mb} --maxmemory-policy noeviction $${REDIS_PASSWORD:+--requirepass "$$REDIS_PASSWORD"}'
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
     volumes:

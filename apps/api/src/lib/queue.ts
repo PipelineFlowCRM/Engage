@@ -248,7 +248,7 @@ export async function unscheduleAudienceCompute(audienceId: number) {
 export async function enqueueBroadcastLaunch(broadcastId: number) {
   return broadcastLaunchQueue.add(QUEUE_BROADCAST_LAUNCH, { broadcastId }, {
     // One launch in flight per broadcast — pause/resume hits the same job id.
-    jobId: `broadcast-launch:${broadcastId}`,
+    jobId: `broadcast-launch__${broadcastId}`,
   });
 }
 

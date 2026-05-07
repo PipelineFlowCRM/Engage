@@ -49,7 +49,7 @@ export async function processJourneyStuckRunSweep(): Promise<void> {
           expectedNodeId: o.currentNodeId,
           expectedVersionId: o.versionId,
         },
-        { jobId: `tick:${o.id.toString()}:${o.currentNodeId}:recovery` },
+        { jobId: `tick__${o.id.toString()}__${o.currentNodeId}__recovery` },
       )
       .catch((err) => logger.warn({ err, runId: o.id.toString() }, 'failed to re-enqueue orphan tick'));
   }

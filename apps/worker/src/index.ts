@@ -124,7 +124,7 @@ void deliverabilityRollupQueue
   )
   .catch((err) => logger.error({ err }, 'failed to register deliverability-rollup schedule'));
 void deliverabilityRollupQueue
-  .add(QUEUE_DELIVERABILITY_ROLLUP, {}, { jobId: 'boot:deliverability-rollup' })
+  .add(QUEUE_DELIVERABILITY_ROLLUP, {}, { jobId: 'boot__deliverability-rollup' })
   .catch(() => undefined);
 
 const stuckRunSweepQueue = new Queue(QUEUE_JOURNEY_STUCK_RUN_SWEEP, { connection: redisConnection });
@@ -139,6 +139,12 @@ void stuckRunSweepQueue
     },
   )
   .catch((err) => logger.error({ err }, 'failed to register journey-stuck-run-sweep schedule'));
+// Boot kick — without this, a worker restart leaves any orphan runs
+// (status=running, no pending tick) waiting up to an hour for the next
+// recurring sweep. Cheapest way to make a restart self-heal.
+void stuckRunSweepQueue
+  .add(QUEUE_JOURNEY_STUCK_RUN_SWEEP, {}, { jobId: 'boot__journey-stuck-run-sweep' })
+  .catch(() => undefined);
 
 for (const w of workers) {
   w.on('failed', (job: Job | undefined, err: Error) => {

@@ -111,7 +111,7 @@ async function fireTimeout(runId: bigint, waitId: bigint): Promise<void> {
         expectedNodeId: node.timeoutNext,
         expectedVersionId: run.versionId,
       },
-      { jobId: `tick:${runId.toString()}:${node.timeoutNext}:timeout` },
+      { jobId: `tick__${runId.toString()}__${node.timeoutNext}__timeout` },
     );
   });
 }

@@ -4,8 +4,8 @@ import { cn } from '@/lib/utils';
 const variants = {
   default: 'bg-secondary text-secondary-foreground',
   brand: 'bg-brand/15 text-brand border border-brand/40',
-  success: 'bg-success/15 text-success-foreground border border-success/40',
-  warning: 'bg-warning/15 text-warning-foreground border border-warning/40',
+  success: 'bg-success/15 text-success border border-success/40',
+  warning: 'bg-warning/15 text-warning border border-warning/40',
   destructive: 'bg-destructive/15 text-destructive border border-destructive/40',
   outline: 'border border-border text-foreground',
 } as const;

@@ -94,7 +94,7 @@ export async function processJourneyTrigger(job: Job<JourneyTriggerJobData>): Pr
           expectedNodeId: startAt,
           expectedVersionId: j.currentVersionId!,
         },
-        { jobId: `tick:${run.id.toString()}:${startAt}:initial` },
+        { jobId: `tick__${run.id.toString()}__${startAt}__initial` },
       );
       logger.info(
         { runId: run.id.toString(), journeyId: j.id, subscriberId: data.subscriberId },
@@ -189,7 +189,7 @@ export async function resumeWaitsForSignal(
           expectedNodeId: node.next,
           expectedVersionId: wait.run.versionId,
         },
-        { jobId: `tick:${w.runId.toString()}:${node.next}:resume` },
+        { jobId: `tick__${w.runId.toString()}__${node.next}__resume` },
       );
     });
   }

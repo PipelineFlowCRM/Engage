@@ -121,7 +121,7 @@ async function runTickInTx(
       const newJob = await tickQueue.add(
         QUEUE_JOURNEY_TICK,
         { runId, expectedNodeId: next, expectedVersionId },
-        { delay: result.scheduledForMs, jobId: `tick:${runId}:${next}:${fireAt.getTime()}` },
+        { delay: result.scheduledForMs, jobId: `tick__${runId}__${next}__${fireAt.getTime()}` },
       );
       await tx.journeyRun.update({
         where: { id },
@@ -143,7 +143,7 @@ async function runTickInTx(
   const newJob = await tickQueue.add(
     QUEUE_JOURNEY_TICK,
     { runId, expectedNodeId: currentNodeId, expectedVersionId },
-    { jobId: `tick:${runId}:${currentNodeId}:budget` },
+    { jobId: `tick__${runId}__${currentNodeId}__budget` },
   );
   await tx.journeyRun.update({
     where: { id },

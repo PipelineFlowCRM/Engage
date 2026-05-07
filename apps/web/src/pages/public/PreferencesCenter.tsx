@@ -85,7 +85,7 @@ export function PreferencesCenter() {
                     }
                     className={`shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
                       g.status === 'subscribed'
-                        ? 'border-success/40 bg-success/10 text-success-foreground hover:bg-success/20'
+                        ? 'border-success/40 bg-success/10 text-success hover:bg-success/20'
                         : 'border-muted text-muted-foreground hover:bg-accent'
                     }`}
                   >
