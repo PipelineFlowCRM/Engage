@@ -4,7 +4,7 @@
 
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react';
 import {
-  Zap, Filter, Clock, Mail, Hourglass, Split, Square,
+  Zap, Filter, Clock, Mail, Hourglass, Split, GitBranch, Square,
 } from 'lucide-react';
 import type { JourneyNodeData } from '@/lib/journeyGraph';
 import { HANDLES } from '@/lib/journeyGraph';
@@ -163,6 +163,32 @@ export function SegmentSplitNode({ data, selected }: NodeProps<Node<JourneyNodeD
   );
 }
 
+export function TraitSplitNode({ data, selected }: NodeProps<Node<JourneyNodeData>>) {
+  const n = data.node as Extract<JourneyNodeData['node'], { type: 'TraitSplit' }>;
+  const first = n.predicates[0];
+  const summary = first
+    ? `${first.key} ${first.operator}${first.value !== undefined ? ` ${String(first.value)}` : ''}`
+    : '(no predicates)';
+  const more = n.predicates.length > 1 ? ` +${n.predicates.length - 1}` : '';
+  return (
+    <NodeShell
+      icon={GitBranch}
+      accent="branch"
+      label="Trait split"
+      body={
+        <div className="flex items-baseline gap-1 min-w-0">
+          <span className="truncate font-mono text-[11px]" title={summary}>{summary}</span>
+          {more ? <span className="shrink-0 text-muted-foreground">{more}</span> : null}
+        </div>
+      }
+      selected={selected}
+    >
+      <Handle type="source" position={Position.Bottom} id={HANDLES.trueNext} style={{ left: '30%' }} className="!h-2 !w-2 !bg-success" />
+      <Handle type="source" position={Position.Bottom} id={HANDLES.falseNext} style={{ left: '70%' }} className="!h-2 !w-2 !bg-destructive" />
+    </NodeShell>
+  );
+}
+
 export function ExitNode({ data, selected }: NodeProps<Node<JourneyNodeData>>) {
   const n = data.node as Extract<JourneyNodeData['node'], { type: 'Exit' }>;
   return (
@@ -183,5 +209,6 @@ export const journeyNodeTypes = {
   Message: MessageNode,
   WaitFor: WaitForNode,
   SegmentSplit: SegmentSplitNode,
+  TraitSplit: TraitSplitNode,
   Exit: ExitNode,
 };

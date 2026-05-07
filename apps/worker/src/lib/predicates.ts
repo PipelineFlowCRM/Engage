@@ -2,15 +2,12 @@
 // audience compiler (Trait / Performed property filters) so an operator
 // authoring a WaitFor predicate sees the same semantics as in audiences.
 
-export type Operator =
-  | 'equals' | 'notEquals' | 'gt' | 'gte' | 'lt' | 'lte'
-  | 'exists' | 'notExists' | 'contains' | 'notContains';
+import type { Predicate, PredicateOperator } from '@pipelineflow-engagement/shared';
 
-export interface Predicate {
-  key: string;
-  operator: Operator;
-  value?: string | number | boolean;
-}
+// Re-exported so existing call-sites that imported from this module keep
+// working without change.
+export type { Predicate };
+export type Operator = PredicateOperator;
 
 export function evaluatePredicates(
   predicates: Predicate[] | undefined | null,
@@ -18,10 +15,13 @@ export function evaluatePredicates(
 ): boolean {
   if (!predicates || predicates.length === 0) return true;
   const props = properties ?? {};
-  return predicates.every((p) => evaluateOne(p, props));
+  return predicates.every((p) => evaluatePredicate(p, props));
 }
 
-function evaluateOne(p: Predicate, props: Record<string, unknown>): boolean {
+// Single-predicate evaluator. Exposed so callers (e.g. TraitSplit auditing)
+// can iterate and capture per-predicate truth values rather than just the
+// AND'd result.
+export function evaluatePredicate(p: Predicate, props: Record<string, unknown>): boolean {
   const lhs = props[p.key];
   switch (p.operator) {
     case 'exists':

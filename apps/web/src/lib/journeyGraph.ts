@@ -42,7 +42,7 @@ export function definitionToGraph(def: JourneyDefinition): JourneyGraph {
   }));
   const edges: Edge[] = [];
   for (const [id, node] of Object.entries(def.nodes)) {
-    if (node.type === 'SegmentSplit') {
+    if (node.type === 'SegmentSplit' || node.type === 'TraitSplit') {
       edges.push(makeEdge(id, node.trueNext, HANDLES.trueNext));
       edges.push(makeEdge(id, node.falseNext, HANDLES.falseNext));
     } else if (node.type === 'WaitFor') {
@@ -141,11 +141,12 @@ function patchTargets(
       // No outgoing edges expected. Warn if any.
       if (out.size > 0) errors.push(`Exit node '${nodeId}' has outgoing edges`);
       return node;
-    case 'SegmentSplit': {
+    case 'SegmentSplit':
+    case 'TraitSplit': {
       const trueNext = out.get(HANDLES.trueNext);
       const falseNext = out.get(HANDLES.falseNext);
-      if (!trueNext) errors.push(`SegmentSplit '${nodeId}' missing 'true' edge`);
-      if (!falseNext) errors.push(`SegmentSplit '${nodeId}' missing 'false' edge`);
+      if (!trueNext) errors.push(`${node.type} '${nodeId}' missing 'true' edge`);
+      if (!falseNext) errors.push(`${node.type} '${nodeId}' missing 'false' edge`);
       return { ...node, trueNext: trueNext ?? '', falseNext: falseNext ?? '' };
     }
     case 'WaitFor': {

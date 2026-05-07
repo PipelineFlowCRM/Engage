@@ -324,7 +324,8 @@ function Toolbar({
       <NodeTypeButton type="Delay" onAdd={onAdd} />
       <NodeTypeButton type="Message" onAdd={onAdd} />
       <NodeTypeButton type="WaitFor" onAdd={onAdd} label="Wait for" />
-      <NodeTypeButton type="SegmentSplit" onAdd={onAdd} label="Split" />
+      <NodeTypeButton type="SegmentSplit" onAdd={onAdd} label="Segment split" />
+      <NodeTypeButton type="TraitSplit" onAdd={onAdd} label="Trait split" />
       <NodeTypeButton type="Exit" onAdd={onAdd} />
       <Button size="sm" variant="ghost" onClick={onAutoLayout}>
         <Wand2 className="h-4 w-4" /> Auto-layout
@@ -356,6 +357,12 @@ function scaffoldFor(type: JourneyNode['type']): JourneyNode {
       next: '',
     };
     case 'SegmentSplit': return { type: 'SegmentSplit', audienceId: 0, trueNext: '', falseNext: '' };
+    case 'TraitSplit': return {
+      type: 'TraitSplit',
+      predicates: [{ key: 'plan', operator: 'equals', value: 'enterprise' }],
+      trueNext: '',
+      falseNext: '',
+    };
     case 'Exit': return { type: 'Exit' };
   }
 }

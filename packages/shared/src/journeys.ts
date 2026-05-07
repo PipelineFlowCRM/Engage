@@ -8,6 +8,25 @@ import { z } from 'zod';
 
 const nodeId = z.string().min(1).max(64);
 
+// ─── Predicate primitive ──────────────────────────────────────────────────
+// Single source of truth for property/trait predicates. Used by TraitSplit
+// (against subscriber.traits), WaitFor.event.properties (against incoming
+// event properties), and EventEntry.properties (same). Matches the operator
+// set that the audience compiler implements for Trait/Performed nodes so
+// the semantics are identical across "audience filter" and "inline split".
+export const predicateOperatorSchema = z.enum([
+  'equals', 'notEquals', 'gt', 'gte', 'lt', 'lte',
+  'exists', 'notExists', 'contains', 'notContains',
+]);
+export type PredicateOperator = z.infer<typeof predicateOperatorSchema>;
+
+export const predicateSchema = z.object({
+  key: z.string().min(1).max(255),
+  operator: predicateOperatorSchema,
+  value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+});
+export type Predicate = z.infer<typeof predicateSchema>;
+
 // ─── Node bodies ───────────────────────────────────────────────────────────
 
 // Entry nodes don't have a `next` — the journey graph's `entry` is the
@@ -20,16 +39,7 @@ const eventEntryNode = z.object({
   // in a running journey at the same versionId.
   event: z.string().min(1).max(255),
   // Optional property predicate. Matches the audience Performed-node shape.
-  properties: z
-    .array(
-      z.object({
-        key: z.string().min(1).max(255),
-        operator: z.enum(['equals', 'notEquals', 'gt', 'gte', 'lt', 'lte', 'exists', 'notExists', 'contains', 'notContains']),
-        value: z.union([z.string(), z.number(), z.boolean()]).optional(),
-      }),
-    )
-    .max(20)
-    .optional(),
+  properties: z.array(predicateSchema).max(20).optional(),
   // Where flow proceeds after the entry is matched.
   next: nodeId,
 });
@@ -76,16 +86,7 @@ const waitForNode = z.object({
       kind: z.literal('event'),
       event: z.string().min(1).max(255),
       // Optional predicate against event.properties.
-      properties: z
-        .array(
-          z.object({
-            key: z.string().min(1).max(255),
-            operator: z.enum(['equals', 'notEquals', 'gt', 'gte', 'lt', 'lte', 'exists', 'notExists', 'contains', 'notContains']),
-            value: z.union([z.string(), z.number(), z.boolean()]).optional(),
-          }),
-        )
-        .max(20)
-        .optional(),
+      properties: z.array(predicateSchema).max(20).optional(),
     }),
     z.object({ kind: z.literal('audience-enter'), audienceId: z.number().int().positive() }),
     z.object({ kind: z.literal('audience-exit'), audienceId: z.number().int().positive() }),
@@ -106,6 +107,17 @@ const segmentSplitNode = z.object({
   falseNext: nodeId,
 });
 
+// TraitSplit branches on subscriber traits using the same predicate
+// shape as audience Trait filters / WaitFor event predicates. Every
+// predicate must match for the run to take the `trueNext` branch
+// (AND semantics — match the audience compiler's Trait node).
+const traitSplitNode = z.object({
+  type: z.literal('TraitSplit'),
+  predicates: z.array(predicateSchema).min(1).max(20),
+  trueNext: nodeId,
+  falseNext: nodeId,
+});
+
 const exitNode = z.object({
   type: z.literal('Exit'),
   // Optional reason surfaced in JourneyRunStep.meta.
@@ -119,6 +131,7 @@ export const journeyNodeSchema = z.discriminatedUnion('type', [
   messageNode,
   waitForNode,
   segmentSplitNode,
+  traitSplitNode,
   exitNode,
 ]);
 export type JourneyNode = z.infer<typeof journeyNodeSchema>;
@@ -150,7 +163,7 @@ export const journeyDefinitionSchema = z
     for (const [id, node] of Object.entries(def.nodes)) {
       const refs: Array<[string, string]> = [];
       if ('next' in node && node.next) refs.push(['next', node.next]);
-      if (node.type === 'SegmentSplit') {
+      if (node.type === 'SegmentSplit' || node.type === 'TraitSplit') {
         refs.push(['trueNext', node.trueNext]);
         refs.push(['falseNext', node.falseNext]);
       }

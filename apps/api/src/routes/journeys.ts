@@ -12,6 +12,7 @@ import { requireAuth } from '../auth/middleware.js';
 import { asyncHandler, HttpError } from '../lib/error.js';
 import { param } from '../lib/params.js';
 import { audit } from '../lib/audit.js';
+import { LOCK_NS, withBlockingAdvisoryLock } from '../lib/locks.js';
 
 import './_sideEffects.js';
 
@@ -109,7 +110,11 @@ journeysRouter.patch(
     if (!Number.isFinite(id)) throw new HttpError(400, 'Invalid id');
     const input = journeyUpdateSchema.parse(req.body);
 
-    const row = await prisma.$transaction(async (tx) => {
+    // Lock per-journey so concurrent save-draft + publish (or two saves
+    // racing through React-Query retries) serialize. Without this, both
+    // could try to insert the same (journeyId, version) and one would
+    // fail with a P2002 unique-constraint error.
+    const row = await withBlockingAdvisoryLock(LOCK_NS.journey, id, async (tx) => {
       const j = await tx.journey.findUnique({ where: { id } });
       if (!j) throw new HttpError(404, 'Journey not found');
 
@@ -172,22 +177,39 @@ journeysRouter.post(
     // node references).
     journeyDefinitionSchema.parse(input.definition);
 
-    const row = await prisma.$transaction(async (tx) => {
-      const j = await tx.journey.findUnique({ where: { id } });
+    // See PATCH route — same lock keeps publish from racing a concurrent
+    // save-draft on the same journey id.
+    const row = await withBlockingAdvisoryLock(LOCK_NS.journey, id, async (tx) => {
+      const j = await tx.journey.findUnique({
+        where: { id },
+        include: { currentVersion: true },
+      });
       if (!j) throw new HttpError(404, 'Journey not found');
 
-      const latest = await tx.journeyVersion.aggregate({
-        where: { journeyId: id },
-        _max: { version: true },
+      // The PATCH (save-draft) route maintains the invariant: at most one
+      // "working draft" version row per journey, sitting at version
+      // (currentVersion.version + 1) — or version 1 when nothing has ever
+      // been published. Publish promotes that draft in place instead of
+      // appending a sibling, so the version sequence has no orphan rows.
+      const publishedVersion = j.currentVersion?.version ?? 0;
+      const draft = await tx.journeyVersion.findFirst({
+        where: { journeyId: id, version: { gt: publishedVersion } },
+        orderBy: { version: 'desc' },
       });
-      const nextVersion = (latest._max.version ?? 0) + 1;
-      const v = await tx.journeyVersion.create({
-        data: {
-          journeyId: id,
-          version: nextVersion,
-          definition: input.definition as unknown as Prisma.InputJsonValue,
-        },
-      });
+
+      const v = draft
+        ? await tx.journeyVersion.update({
+            where: { id: draft.id },
+            data: { definition: input.definition as unknown as Prisma.InputJsonValue },
+          })
+        : await tx.journeyVersion.create({
+            data: {
+              journeyId: id,
+              version: publishedVersion + 1,
+              definition: input.definition as unknown as Prisma.InputJsonValue,
+            },
+          });
+
       return tx.journey.update({
         where: { id },
         data: {

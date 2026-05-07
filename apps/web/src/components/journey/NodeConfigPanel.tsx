@@ -3,11 +3,26 @@
 // produces a new JourneyNode; the editor patches it back into xyflow's
 // node.data.
 
+import { useRef } from 'react';
 import type { JourneyNode } from '@pipelineflow-engagement/shared';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
-import { Trash2 } from 'lucide-react';
+import { Trash2, Plus, X } from 'lucide-react';
+
+type TraitSplitNode = Extract<JourneyNode, { type: 'TraitSplit' }>;
+type TraitPredicate = TraitSplitNode['predicates'][number];
+
+type PredicateOperator =
+  | 'equals' | 'notEquals' | 'gt' | 'gte' | 'lt' | 'lte'
+  | 'exists' | 'notExists' | 'contains' | 'notContains';
+
+const PREDICATE_OPERATORS: PredicateOperator[] = [
+  'equals', 'notEquals', 'gt', 'gte', 'lt', 'lte',
+  'contains', 'notContains', 'exists', 'notExists',
+];
+
+const OPERATORS_WITHOUT_VALUE: ReadonlySet<PredicateOperator> = new Set(['exists', 'notExists']);
 
 interface NodeConfigPanelProps {
   nodeId: string;
@@ -251,6 +266,9 @@ function renderFields(
         </div>
       );
 
+    case 'TraitSplit':
+      return <TraitSplitFields node={node} onChange={onChange} />;
+
     case 'Exit':
       return (
         <div className="space-y-2">
@@ -297,6 +315,157 @@ function TemplateSelect({
       ))}
     </select>
   );
+}
+
+// Stable, client-only id per predicate row. Decouples React reconciliation
+// from the predicate's index in the array, so removing a middle row no
+// longer remounts every input below it (which would steal focus and
+// interrupt IME composition).
+function TraitSplitFields({
+  node, onChange,
+}: { node: TraitSplitNode; onChange: (next: JourneyNode) => void }) {
+  // useRef holds the keys; we mutate it in lockstep with predicates so a
+  // re-render never sees a length mismatch. Initialized lazily from the
+  // current count (handles freshly-loaded definitions without ids).
+  const keysRef = useRef<string[]>([]);
+  if (keysRef.current.length !== node.predicates.length) {
+    // Reconcile on hydration / external resets. We can't recover stable
+    // ids for pre-existing rows here (the source of truth has none) — but
+    // this only triggers on load or on out-of-band changes, not on edits
+    // routed through the handlers below.
+    keysRef.current = node.predicates.map((_, i) => keysRef.current[i] ?? newKey());
+  }
+
+  const updatePredicates = (
+    nextPredicates: TraitPredicate[],
+    nextKeys: string[],
+  ): void => {
+    keysRef.current = nextKeys;
+    onChange({ ...node, predicates: nextPredicates });
+  };
+
+  return (
+    <div className="space-y-3">
+      <Label>Trait predicates</Label>
+      <p className="text-xs text-muted-foreground">
+        All predicates must match (AND) for the run to take the <span className="font-mono text-success">true</span> branch.
+        Evaluated against subscriber traits at the moment of the split — no audience round-trip.
+      </p>
+      <div className="space-y-2">
+        {node.predicates.map((p, i) => {
+          const uiKey = keysRef.current[i]!;
+          const operatorTakesValue = !OPERATORS_WITHOUT_VALUE.has(p.operator);
+          return (
+            <div key={uiKey} className="space-y-1.5 rounded-md border border-border/60 bg-background/50 p-2">
+              <div className="flex items-start gap-1.5">
+                <Input
+                  className="flex-1 font-mono text-xs"
+                  value={p.key}
+                  maxLength={255}
+                  placeholder="trait_key"
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    updatePredicates(
+                      node.predicates.map((pp, j) => (j === i ? { ...pp, key: value } : pp)),
+                      keysRef.current,
+                    );
+                  }}
+                />
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title="Remove predicate"
+                  disabled={node.predicates.length <= 1}
+                  onClick={() => {
+                    if (node.predicates.length <= 1) return;
+                    updatePredicates(
+                      node.predicates.filter((_, j) => j !== i),
+                      keysRef.current.filter((_, j) => j !== i),
+                    );
+                  }}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <select
+                  className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+                  value={p.operator}
+                  onChange={(e) => {
+                    const op = e.target.value as PredicateOperator;
+                    const nextPreds = node.predicates.map((pp, j) => {
+                      if (j !== i) return pp;
+                      // Drop value when switching to a no-value operator,
+                      // and don't carry an empty string back over when
+                      // switching to one that takes a value (`equals ""`
+                      // would silently match missing traits).
+                      if (OPERATORS_WITHOUT_VALUE.has(op)) {
+                        return { key: pp.key, operator: op };
+                      }
+                      return { key: pp.key, operator: op, value: pp.value ?? undefined };
+                    });
+                    updatePredicates(nextPreds, keysRef.current);
+                  }}
+                >
+                  {PREDICATE_OPERATORS.map((op) => (
+                    <option key={op} value={op}>{op}</option>
+                  ))}
+                </select>
+                {operatorTakesValue ? (
+                  <Input
+                    className="flex-1 text-xs"
+                    value={p.value === undefined ? '' : String(p.value)}
+                    placeholder="value"
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      // Empty string → undefined. The evaluator treats
+                      // `equals` against undefined as a non-match, which
+                      // matches operator intent ("I haven't filled this
+                      // in yet") far better than the prior behavior
+                      // (`coerceString(undefined) === ''` matched any
+                      // missing trait).
+                      const value = raw === '' ? undefined : raw;
+                      updatePredicates(
+                        node.predicates.map((pp, j) => (j === i ? { ...pp, value } : pp)),
+                        keysRef.current,
+                      );
+                    }}
+                  />
+                ) : (
+                  <span className="text-xs text-muted-foreground">(no value)</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={node.predicates.length >= 20}
+        onClick={() => {
+          // Scaffold without a placeholder value — see the `value === ''
+          // → undefined` reasoning above. Operator must explicitly fill
+          // it in to get a meaningful predicate.
+          updatePredicates(
+            [...node.predicates, { key: '', operator: 'equals' }],
+            [...keysRef.current, newKey()],
+          );
+        }}
+      >
+        <Plus className="h-3 w-3" /> Add predicate
+      </Button>
+    </div>
+  );
+}
+
+function newKey(): string {
+  // crypto.randomUUID() is everywhere modern browsers ship; for the
+  // editor (only loaded behind auth in modern browsers) the polyfill
+  // path isn't worth the bytes.
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `k-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function humanSeconds(s: number): string {

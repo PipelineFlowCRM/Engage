@@ -33,6 +33,7 @@ import {
   lookupNode,
   parseDefinition,
 } from '../lib/journey.js';
+import { evaluatePredicate } from '../lib/predicates.js';
 import { LOCK_NS, withAdvisoryLock } from '../lib/locks.js';
 import { sendTemplate } from '../lib/messaging.js';
 import { journeyTickQueue as tickQueue } from '../lib/queues.js';
@@ -251,6 +252,31 @@ async function executeNode(
       await recordStepInTx(ctx.tx, ctx.runIdBigInt, currentNodeId, 'SegmentSplit', 'exited', {
         audienceId: node.audienceId,
         branch: member ? 'true' : 'false',
+      });
+      return { kind: 'continue', nextNodeId: branch };
+    }
+
+    case 'TraitSplit': {
+      // Evaluates the predicates against the live subscriber.traits at the
+      // moment of the split — no audience round-trip, so no staleness from
+      // audience recompute lag. AND semantics across predicates.
+      const traits = (subscriber.traits as Record<string, unknown> | null) ?? {};
+      const failedKeys: string[] = [];
+      // Iterate (rather than evaluatePredicates+early-out) so the audit
+      // step can show *which* predicates failed when the run takes the
+      // false branch — the most common debugging question for TraitSplit.
+      for (const p of node.predicates) {
+        if (!evaluatePredicate(p, traits)) failedKeys.push(p.key);
+      }
+      const matched = failedKeys.length === 0;
+      const branch = matched ? node.trueNext : node.falseNext;
+      await recordStepInTx(ctx.tx, ctx.runIdBigInt, currentNodeId, 'TraitSplit', 'exited', {
+        branch: matched ? 'true' : 'false',
+        predicateCount: node.predicates.length,
+        // Cap at 10 keys so a misconfigured TraitSplit can't bloat the
+        // step row's meta JSON. The full predicate list is in the
+        // journey definition; this is just a debug breadcrumb.
+        ...(failedKeys.length > 0 ? { failedPredicateKeys: failedKeys.slice(0, 10) } : {}),
       });
       return { kind: 'continue', nextNodeId: branch };
     }
