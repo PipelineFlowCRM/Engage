@@ -298,6 +298,25 @@ journeysRouter.get(
   }),
 );
 
+// Per-node count of subscribers currently sitting on each node. Powers the
+// "N here" pills overlaid on the read-only journey map. Filtered to active
+// runs (running/waiting) — completed/failed/cancelled don't sit anywhere.
+journeysRouter.get(
+  '/:id/run-counts',
+  asyncHandler(async (req, res) => {
+    const id = Number(param(req, 'id'));
+    if (!Number.isFinite(id)) throw new HttpError(400, 'Invalid id');
+    const grouped = await prisma.journeyRun.groupBy({
+      by: ['currentNodeId'],
+      where: { journeyId: id, status: { in: ['running', 'waiting'] } },
+      _count: { _all: true },
+    });
+    const counts: Record<string, number> = {};
+    for (const g of grouped) counts[g.currentNodeId] = g._count._all;
+    res.json({ counts });
+  }),
+);
+
 journeysRouter.get(
   '/:id/runs/:runId',
   asyncHandler(async (req, res) => {

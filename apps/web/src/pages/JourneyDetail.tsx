@@ -1,10 +1,16 @@
+import { useMemo } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import {
+  journeyDefinitionSchema,
+  type JourneyDefinition,
+} from '@pipelineflow-engagement/shared';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { JourneyGraphView } from '@/components/journey/JourneyGraphView';
 import { relativeTime } from '@/lib/utils';
 
 export function JourneyDetail() {
@@ -15,8 +21,8 @@ export function JourneyDetail() {
       api.get<{
         journey: {
           id: number; name: string; status: string;
-          currentVersion: { version: number; publishedAt: string } | null;
-          versions: Array<{ id: number; version: number; publishedAt: string }>;
+          currentVersion: { version: number; publishedAt: string; definition: unknown } | null;
+          versions: Array<{ id: number; version: number; publishedAt: string; definition: unknown }>;
         };
       }>(`/journeys/${id}`),
     enabled: Boolean(id),
@@ -38,6 +44,32 @@ export function JourneyDetail() {
     enabled: Boolean(id),
     refetchInterval: 5_000,
   });
+  // Authoritative per-node counts for the journey map overlay. Polled in
+  // step with the runs table so the pills and rows stay in sync.
+  const runCountsQuery = useQuery({
+    queryKey: ['journey', id, 'run-counts'],
+    queryFn: () =>
+      api.get<{ counts: Record<string, number> }>(`/journeys/${id}/run-counts`),
+    enabled: Boolean(id),
+    refetchInterval: 5_000,
+  });
+
+  // Parse the published definition outside the early-return so hooks
+  // ordering stays stable. Distinguish three states so we can show a
+  // "stored definition is broken" message separately from the unpublished
+  // empty state.
+  type DefState =
+    | { kind: 'none' }
+    | { kind: 'invalid' }
+    | { kind: 'ok'; def: JourneyDefinition };
+  const defState = useMemo<DefState>(() => {
+    const raw = journey.data?.journey.currentVersion?.definition;
+    if (raw === undefined || raw === null) return { kind: 'none' };
+    const parsed = journeyDefinitionSchema.safeParse(raw);
+    return parsed.success ? { kind: 'ok', def: parsed.data } : { kind: 'invalid' };
+  }, [journey.data]);
+
+  const runCounts = runCountsQuery.data?.counts;
 
   if (!journey.data) {
     return (
@@ -62,6 +94,38 @@ export function JourneyDetail() {
         }
         actions={<Button asChild variant="outline"><Link to={`/journeys/${j.id}/edit`}>Edit</Link></Button>}
       />
+      <div className="px-6 pt-6">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+            <CardTitle>Journey map</CardTitle>
+            <span className="text-xs text-muted-foreground">
+              {defState.kind === 'ok'
+                ? `${Object.keys(defState.def.nodes).length} nodes · v${j.currentVersion?.version ?? '—'}`
+                : defState.kind === 'invalid'
+                  ? 'Definition error'
+                  : 'No published version'}
+            </span>
+          </CardHeader>
+          <CardContent className="p-0">
+            {defState.kind === 'ok' ? (
+              <JourneyGraphView
+                definition={defState.def}
+                runCounts={runCounts}
+                className="h-[420px] rounded-b-md overflow-hidden"
+              />
+            ) : defState.kind === 'invalid' ? (
+              <div className="flex h-[420px] items-center justify-center px-6 text-center text-sm text-destructive">
+                Stored definition for v{j.currentVersion?.version} could not be parsed.
+                Open the editor to repair it.
+              </div>
+            ) : (
+              <div className="flex h-[420px] items-center justify-center text-sm text-muted-foreground">
+                Publish a version to see the journey map.
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
       <div className="grid grid-cols-1 gap-4 p-6 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardHeader><CardTitle>Recent runs</CardTitle></CardHeader>
